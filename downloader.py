@@ -4,12 +4,13 @@ from datetime import datetime
 
 import pandas as pd
 import boto3
+
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 
 # =========================
-# CONFIG (DO NOT HARDCODE IN REAL USE)
+# CONFIG
 # =========================
 
 ALPACA_KEY = "PKA4A6THLEKI6QD2MQPOAO25J3"
@@ -25,7 +26,8 @@ SYMBOL_FILE = "symbols.txt"
 START_DATE = datetime(2000, 1, 1)
 END_DATE = datetime(2026, 1, 1)
 
-REQUESTS_PER_MIN = 200
+BATCH_SIZE = 50          # 🔥 OPTIMAL (50–100 range)
+REQUESTS_PER_MIN = 200   # Alpaca limit
 
 # =========================
 # CLIENTS
@@ -41,7 +43,7 @@ s3 = boto3.client(
 )
 
 # =========================
-# RATE LIMIT
+# RATE LIMITER
 # =========================
 
 calls = []
@@ -54,28 +56,37 @@ def rate_limit():
 
     if len(calls) >= REQUESTS_PER_MIN:
         sleep_time = 60 - (now - calls[0])
-        time.sleep(max(0, sleep_time))
+        if sleep_time > 0:
+            time.sleep(sleep_time)
 
     calls.append(time.time())
 
 # =========================
-# SYMBOLS
+# LOAD SYMBOLS
 # =========================
 
 def load_symbols():
     with open(SYMBOL_FILE, "r") as f:
-        return [line.strip() for line in f if line.strip()]
+        return [x.strip() for x in f if x.strip()]
 
 # =========================
-# DOWNLOAD + UPLOAD
+# CHUNKER
 # =========================
 
-def process_symbol(symbol):
+def chunk(lst, size):
+    for i in range(0, len(lst), size):
+        yield lst[i:i + size]
+
+# =========================
+# PROCESS BATCH
+# =========================
+
+def process_batch(batch, batch_id):
     try:
         rate_limit()
 
         request = StockBarsRequest(
-            symbol_or_symbols=[symbol],
+            symbol_or_symbols=batch,
             timeframe=TimeFrame.Minute,
             start=START_DATE,
             end=END_DATE
@@ -85,40 +96,57 @@ def process_symbol(symbol):
         df = bars.df
 
         if df.empty:
-            print(f"SKIP {symbol}")
+            print(f"[SKIP] batch {batch_id}")
             return
 
         df = df.reset_index()
 
-        file_path = f"/tmp/{symbol}.parquet"
+        file_path = f"/tmp/batch_{batch_id}.parquet"
+
+        # 🔥 fast compression
         df.to_parquet(file_path, compression="snappy")
 
+        # upload to R2
         s3.upload_file(
             file_path,
             R2_BUCKET,
-            f"{symbol}.parquet"
+            f"batch_{batch_id}.parquet"
         )
 
         os.remove(file_path)
 
-        print(f"OK {symbol}")
+        print(f"[OK] batch {batch_id} | symbols={len(batch)} | rows={len(df)}")
 
     except Exception as e:
-        print(f"ERROR {symbol}: {e}")
+        print(f"[ERROR] batch {batch_id}: {e}")
 
 # =========================
-# MAIN LOOP
+# MAIN
 # =========================
 
 def main():
     symbols = load_symbols()
+
     print("Total symbols:", len(symbols))
+    print("Batch size:", BATCH_SIZE)
 
-    for i, symbol in enumerate(symbols):
-        process_symbol(symbol)
+    batches = list(chunk(symbols, BATCH_SIZE))
 
-        if i % 100 == 0:
-            print(f"Progress: {i}/{len(symbols)}")
+    start = time.time()
+
+    for i, batch in enumerate(batches):
+        process_batch(batch, i)
+
+        # progress
+        if i % 5 == 0:
+            elapsed = time.time() - start
+            print(f"Progress: {i}/{len(batches)} | elapsed {elapsed/60:.2f} min")
+
+    print("DONE")
+
+# =========================
+# RUN
+# =========================
 
 if __name__ == "__main__":
     main()

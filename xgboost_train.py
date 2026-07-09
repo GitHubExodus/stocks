@@ -501,8 +501,8 @@ def download_folder(r2_folder, local_folder, start=0, limit=None):
 # DOWNLOAD INPUTS
 # ----------------------------------------------------------
 
-START_STOCK = 2      # Start at the third stock (0-based indexing)
-TEST_STOCKS = 1     # Download 10 stocks
+START_STOCK = 0      # Start at the third stock (0-based indexing)
+TEST_STOCKS = None     # Download 10 stocks
 
 input_count = download_folder(
     "input",

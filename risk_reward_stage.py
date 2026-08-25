@@ -159,8 +159,19 @@ class RiskRewardStage:
                 # EVERY BAR IS AN ENTRY
                 # ====================================================
 
+                total_entries = len(close_data) - 1
+                progress_interval = 10_000
+
+                log(
+                    f"Risk Reward entries started | "
+                    f"symbol={symbol} | "
+                    f"trade_type={trade_type} | "
+                    f"SL={stop_loss_percentage}% | "
+                    f"total_entries={total_entries}"
+                )
+
                 for entry_index in range(
-                    len(close_data) - 1
+                    total_entries
                 ):
 
                     entry_price = close_data.iloc[
@@ -168,6 +179,25 @@ class RiskRewardStage:
                     ]
 
                     self.entry_price = entry_price
+
+                    if (
+                        entry_index > 0
+                        and entry_index % progress_interval == 0
+                    ):
+                        progress_percent = (
+                            entry_index
+                            / total_entries
+                            * 100
+                        )
+
+                        log(
+                            f"Risk Reward progress | "
+                            f"symbol={symbol} | "
+                            f"trade_type={trade_type} | "
+                            f"SL={stop_loss_percentage}% | "
+                            f"entry={entry_index:,}/{total_entries:,} | "
+                            f"progress={progress_percent:.1f}%"
+                        )
 
                     # =================================================
                     # FIND ORIGINAL EXIT FOR EACH RR
@@ -207,9 +237,20 @@ class RiskRewardStage:
                             ratio
                         ].append(result)
 
+
+                log(
+                    f"Risk Reward entries completed | "
+                    f"symbol={symbol} | "
+                    f"trade_type={trade_type} | "
+                    f"SL={stop_loss_percentage}% | "
+                    f"entries={total_entries:,}"
+                )
+
                 # ====================================================
                 # SAVE EACH RR
                 # ====================================================
+
+                
 
                 for ratio, rows in (
                     results_by_ratio.items()
@@ -226,6 +267,15 @@ class RiskRewardStage:
                     ][
                         ratio
                     ] = risk_reward_data
+
+                    log(
+                        f"Risk Reward saving | "
+                        f"symbol={symbol} | "
+                        f"trade_type={trade_type} | "
+                        f"SL={stop_loss_percentage}% | "
+                        f"RR={ratio} | "
+                        f"rows={len(risk_reward_data):,}"
+                    )
 
                     save_risk_reward_data(
                         symbol=symbol,

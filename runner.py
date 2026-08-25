@@ -16,7 +16,7 @@ from cloud_access import (
 # SERVER CONFIGURATION
 # ============================================================
 
-SERVER_URL = "http://YOUR_SERVER_IP:5000"
+SERVER_URL = "https://dominga-nongravitative-unskillfully.ngrok-free.dev"
 
 
 # ============================================================

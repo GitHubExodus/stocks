@@ -21,7 +21,7 @@ R2_BUCKET_NAME = "stocks-data"
 STOCK_SYMBOLS_PATH = "misc/symbols.txt"
 COMPLETED_SYMBOLS_PATH = "misc/completed_symbols.txt"
 
-RAW_STOCK_DATA_PATH = "raw"
+RAW_STOCK_DATA_PATH = ""
 INPUT_PATH = "input"
 INPUT_STATISTICS_PATH = "input_statistics"
 RISK_REWARD_PATH = "riskreward"
@@ -377,7 +377,7 @@ def mark_stock_completed(symbol):
 # ============================================================
 
 def download_stock_data(symbol):
-    key = f"{RAW_STOCK_DATA_PATH}/{symbol}.parquet"
+    key = f"{symbol}.parquet"
 
     response = s3.get_object(
         Bucket=R2_BUCKET_NAME,

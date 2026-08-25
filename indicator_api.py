@@ -54,7 +54,7 @@ class IndicatorAPI:
         self.close = self.data["close"].astype(float)
         self.high = self.data["high"].astype(float)
         self.low = self.data["low"].astype(float)
-        self.volume = self.data["vol"].astype(float)
+        self.volume = self.data["volume"].astype(float)
         self.vwap = self.data["vwap"].astype(float)
 
     # ============================================================

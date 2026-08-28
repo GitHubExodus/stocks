@@ -173,17 +173,19 @@ class GridTable:
             self.grid[coordinate] = {
                 "Total_Trades": 0,
 
-                "Total_Time_Elapsed_Minutes": (
-                    0.0
-                ),
+                "Total_Wins": 0,
 
-                "Total_Return_Percent": (
-                    0.0
-                ),
+                "Total_Losses": 0,
 
-                "Sum_Return_Squared": (
-                    0.0
-                ),
+                "Total_Win_Return_Percent": 0.0,
+
+                "Total_Loss_Return_Percent": 0.0,
+
+                "Total_Time_Elapsed_Minutes": 0.0,
+
+                "Total_Return_Percent": 0.0,
+
+                "Sum_Return_Squared": 0.0,
             }
 
         cell = self.grid[
@@ -202,6 +204,7 @@ class GridTable:
             ]
         )
 
+
         # --------------------------------------------------------
         # Total trades
         # --------------------------------------------------------
@@ -209,6 +212,32 @@ class GridTable:
         cell[
             "Total_Trades"
         ] += 1
+
+
+        # --------------------------------------------------------
+        # Wins and losses
+        # --------------------------------------------------------
+
+        if trade_return > 0:
+
+            cell[
+                "Total_Wins"
+            ] += 1
+
+            cell[
+                "Total_Win_Return_Percent"
+            ] += trade_return
+
+        elif trade_return <= 0:
+
+            cell[
+                "Total_Losses"
+            ] += 1
+
+            cell[
+                "Total_Loss_Return_Percent"
+            ] += trade_return
+
 
         # --------------------------------------------------------
         # Total elapsed time
@@ -281,6 +310,30 @@ class GridTable:
             row[
                 "Total_Trades"
             ] = total_trades
+
+            row[
+                "Total_Wins"
+            ] = cell[
+                "Total_Wins"
+            ]
+
+            row[
+                "Total_Losses"
+            ] = cell[
+                "Total_Losses"
+            ]
+
+            row[
+                "Total_Win_Return_Percent"
+            ] = cell[
+                "Total_Win_Return_Percent"
+            ]
+
+            row[
+                "Total_Loss_Return_Percent"
+            ] = cell[
+                "Total_Loss_Return_Percent"
+            ]
 
             # ----------------------------------------------------
             # Time

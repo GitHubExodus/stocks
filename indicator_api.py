@@ -89,7 +89,7 @@ class IndicatorAPI:
         )
 
         self.volume = (
-            self.data["vol"]
+            self.data["volume"]
             .to_numpy(dtype=np.float64)
         )
 

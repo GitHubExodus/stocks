@@ -1,18 +1,22 @@
+import requests
+import traceback
+
 from input_stage import InputStage
 from risk_reward_stage import RiskRewardStage
 from state_space_stage import StateSpaceStage
 
 from cloud_access import (
     log,
+    log_warning,
     log_error,
 )
 
 
 # ============================================================
-# STOCK CONFIGURATION
+# SERVER CONFIGURATION
 # ============================================================
 
-STOCK_SYMBOL = "DELL"
+SERVER_URL = "http://YOUR_SERVER_IP:5000"
 
 
 # ============================================================
@@ -80,9 +84,49 @@ def create_bin_counts(input_statistics):
     bin_counts = {}
 
     for input_name in input_statistics["input"]:
-        bin_counts[input_name] = get_bin_count(input_name)
+
+        bin_counts[input_name] = (
+            get_bin_count(input_name)
+        )
 
     return bin_counts
+
+
+# ============================================================
+# SERVER COMMUNICATION
+# ============================================================
+
+def get_next_stock():
+    """
+    Ask the server for the next available stock.
+
+    Returns:
+        str | None
+    """
+
+    response = requests.get(
+        f"{SERVER_URL}/next-stock",
+        timeout=240,
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    return data.get("symbol")
+
+
+def report_stock_completed(symbol):
+    """
+    Tell the server that a stock completed successfully.
+    """
+
+    response = requests.post(
+        f"{SERVER_URL}/stock-completed/{symbol}",
+        timeout=240,
+    )
+
+    response.raise_for_status()
 
 
 # ============================================================
@@ -93,10 +137,8 @@ def process_stock(symbol):
     """
     Run the complete pipeline for one stock.
 
-    Stages:
-        1. InputStage
-        2. RiskRewardStage
-        3. StateSpaceStage
+    The stock is only reported as completed if every
+    required stage succeeds.
     """
 
     log(
@@ -130,9 +172,7 @@ def process_stock(symbol):
         raise
 
     log(
-        f"STAGE COMPLETE | "
-        f"SYMBOL={symbol} | "
-        f"STAGE=InputStage"
+        f"STAGE COMPLETE | SYMBOL={symbol} | STAGE=InputStage"
     )
 
     # ========================================================
@@ -182,14 +222,14 @@ def process_stock(symbol):
     # ========================================================
 
     log(
-        f"STAGE START | "
-        f"SYMBOL={symbol} | "
-        f"STAGE=RiskRewardStage"
+        f"STAGE START | SYMBOL={symbol} | STAGE=RiskRewardStage"
     )
 
     try:
 
-        risk_reward_stage = RiskRewardStage()
+        risk_reward_stage = (
+            RiskRewardStage()
+        )
 
         risk_reward_results = (
             risk_reward_stage.run(
@@ -229,7 +269,9 @@ def process_stock(symbol):
 
     try:
 
-        state_space_stage = StateSpaceStage()
+        state_space_stage = (
+            StateSpaceStage()
+        )
 
         total_combinations = 0
 
@@ -268,7 +310,7 @@ def process_stock(symbol):
                     )
 
                     # ----------------------------------------
-                    # Get corresponding RR data
+                    # Get the corresponding RR data
                     # ----------------------------------------
 
                     risk_reward_data = (
@@ -340,42 +382,100 @@ def process_stock(symbol):
     # STOCK COMPLETE
     # ========================================================
 
+    report_stock_completed(
+        symbol
+    )
+
     log(
         f"STOCK COMPLETE | SYMBOL={symbol}"
     )
 
 
 # ============================================================
-# MAIN
+# POD MAIN LOOP
 # ============================================================
 
 def main():
 
-    symbol = STOCK_SYMBOL
-
     log(
-        f"PROGRAM STARTED | SYMBOL={symbol}"
+        "POD STARTED"
     )
 
-    try:
+    log(
+        f"SERVER={SERVER_URL}"
+    )
 
-        process_stock(
-            symbol
-        )
+    while True:
 
-    except Exception:
+        # ====================================================
+        # GET NEXT STOCK
+        # ====================================================
 
-        # The actual error was already logged
-        # by the stage that failed.
+        try:
 
-        log(
-            f"STOCK FAILED | SYMBOL={symbol}"
-        )
+            symbol = get_next_stock()
 
-        raise
+        except Exception as error:
+
+            log_error(
+                stage="GetNextStock",
+                symbol="UNKNOWN",
+                error=error,
+            )
+
+            # Stop the pod.
+            #
+            # This avoids repeatedly hammering the server
+            # if the server is unavailable.
+
+            break
+
+        # ====================================================
+        # NO MORE STOCKS
+        # ====================================================
+
+        if symbol is None:
+
+            log(
+                "NO STOCKS AVAILABLE"
+            )
+
+            break
+
+        # ====================================================
+        # PROCESS STOCK
+        # ====================================================
+
+        try:
+
+            process_stock(
+                symbol
+            )
+
+        except Exception:
+
+            # The actual error was already logged by
+            # the stage that failed.
+
+            log(
+                f"STOCK FAILED | SYMBOL={symbol}"
+            )
+
+            # IMPORTANT:
+            #
+            # Do NOT call report_stock_completed().
+            #
+            # The server therefore knows this stock was
+            # not completed.
+
+            break
+
+    # ========================================================
+    # POD STOPPED
+    # ========================================================
 
     log(
-        f"PROGRAM STOPPED | SYMBOL={symbol}"
+        "POD STOPPED"
     )
 
 

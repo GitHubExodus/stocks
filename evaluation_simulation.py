@@ -167,6 +167,10 @@ def match_rr_to_input_rows(
 # NUMBA GRID EVALUATION
 # ============================================================
 
+# ============================================================
+# NUMBA GRID EVALUATION
+# ============================================================
+
 @njit
 def _evaluate_grid_trades(
     input_values,
@@ -174,7 +178,6 @@ def _evaluate_grid_trades(
     input_row_indices,
     rr_returns,
     rr_time_elapsed,
-    grid_inputs,
     grid_bin_counts,
     grid_bin_sizes,
     grid_mins,
@@ -186,32 +189,25 @@ def _evaluate_grid_trades(
     """
     Evaluate RR trades against the FROZEN TRAINING GRID.
 
-    No new grid is created.
+    ONLY the training grid is used.
 
-    The training grid configuration supplies:
+    No validation grid is created.
+    No grid is modified.
+    No new statistics are calculated.
 
-        bin_count
-        bin_size
-        min
+    Grid lookup:
 
-    The training grid cells supply:
+        1. Calculate input coordinates.
+        2. Convert coordinates into a uint64 key.
+        3. Binary-search the sorted training-grid keys.
+        4. Read training Total_Trades / Total_Wins.
+        5. Calculate training win rate.
+        6. Select the trade if the training win rate
+           is above the threshold.
+        7. Compound equity.
 
-        Total_Trades
-        Total_Wins
-
-    For every RR trade:
-
-        1. Find matched input row.
-        2. Calculate grid coordinate.
-        3. Find training grid cell.
-        4. Calculate training win rate.
-        5. Keep trade only if win rate > threshold.
-        6. Compound equity.
-
-    Returns:
-
-        selected_mask
-        equity
+    uint64 is used for the grid key so large combinations
+    of dimensions do not cause signed int64 overflow.
     """
 
     num_rr = len(
@@ -223,7 +219,7 @@ def _evaluate_grid_trades(
     )
 
     num_grid_cells = len(
-        grid_total_trades
+        grid_dimensions
     )
 
     selected_mask = np.zeros(
@@ -261,13 +257,10 @@ def _evaluate_grid_trades(
             continue
 
         # ----------------------------------------------------
-        # Calculate flattened grid coordinate.
-        #
-        # The coordinate is converted into a single integer
-        # so the training grid can be looked up quickly.
+        # BUILD UINT64 GRID KEY
         # ----------------------------------------------------
 
-        flattened_coordinate = 0
+        grid_key = np.uint64(0)
 
         valid_coordinate = True
 
@@ -304,9 +297,13 @@ def _evaluate_grid_trades(
                 ]
             )
 
-            if bin_count <= 0:
+            if bin_count == 0:
                 valid_coordinate = False
                 break
+
+            # ------------------------------------------------
+            # Calculate coordinate.
+            # ------------------------------------------------
 
             if bin_size <= 0.0:
 
@@ -325,47 +322,92 @@ def _evaluate_grid_trades(
                 )
 
                 if coordinate < 0:
+
                     coordinate = 0
 
-                elif coordinate >= bin_count:
+                elif coordinate >= int(
+                    bin_count
+                ):
+
                     coordinate = (
-                        bin_count - 1
+                        int(bin_count)
+                        - 1
                     )
 
-            flattened_coordinate = (
-                flattened_coordinate
+            # ------------------------------------------------
+            # Convert coordinate to uint64.
+            # ------------------------------------------------
+
+            coordinate_uint = np.uint64(
+                coordinate
+            )
+
+            # ------------------------------------------------
+            # UINT64 WRAPPING KEY
+            #
+            # This avoids signed integer overflow.
+            # ------------------------------------------------
+
+            grid_key = (
+                grid_key
                 * bin_count
-                + coordinate
+                + coordinate_uint
             )
 
         if not valid_coordinate:
             continue
 
-        # ----------------------------------------------------
-        # Find training grid cell.
-        #
-        # grid_dimensions contains the flattened coordinate
-        # of every populated training cell.
-        # ----------------------------------------------------
+        # ====================================================
+        # BINARY SEARCH TRAINING GRID
+        # ====================================================
 
-        cell_index = -1
+        left = 0
+        right = num_grid_cells
 
-        for grid_index in range(
-            num_grid_cells
-        ):
+        while left < right:
+
+            middle = (
+                left
+                + (
+                    right - left
+                ) // 2
+            )
 
             if (
                 grid_dimensions[
-                    grid_index
+                    middle
                 ]
-                == flattened_coordinate
+                < grid_key
             ):
 
-                cell_index = grid_index
-                break
+                left = (
+                    middle + 1
+                )
 
-        if cell_index < 0:
+            else:
+
+                right = middle
+
+        cell_index = left
+
+        # ----------------------------------------------------
+        # Key does not exist.
+        # ----------------------------------------------------
+
+        if cell_index >= num_grid_cells:
             continue
+
+        if (
+            grid_dimensions[
+                cell_index
+            ]
+            != grid_key
+        ):
+            continue
+
+        # ====================================================
+        # TRAINING GRID STATISTICS
+        # ====================================================
 
         total_trades = (
             grid_total_trades[
@@ -387,15 +429,19 @@ def _evaluate_grid_trades(
             / total_trades
         )
 
-        # ----------------------------------------------------
-        # ONLY TRAINING CELLS ABOVE THRESHOLD
-        # ----------------------------------------------------
+        # ====================================================
+        # TRAINING GRID FILTER
+        # ====================================================
 
         if (
             training_win_rate
             <= win_rate_threshold
         ):
             continue
+
+        # ====================================================
+        # RR DATA
+        # ====================================================
 
         trade_return = (
             rr_returns[
@@ -419,9 +465,9 @@ def _evaluate_grid_trades(
         ):
             continue
 
-        # ----------------------------------------------------
-        # Compound equity.
-        # ----------------------------------------------------
+        # ====================================================
+        # COMPOUND EQUITY
+        # ====================================================
 
         current_equity *= (
             1.0
@@ -441,6 +487,9 @@ def _evaluate_grid_trades(
         equity,
     )
 
+# ============================================================
+# PREPARE TRAINING GRID
+# ============================================================
 
 # ============================================================
 # PREPARE TRAINING GRID
@@ -451,14 +500,19 @@ def prepare_training_grid(
     grid_data,
 ):
     """
-    Convert the training grid from pandas into NumPy arrays.
+    Prepare the FROZEN TRAINING GRID for fast Numba lookup.
 
     IMPORTANT:
 
-        This does NOT create or modify the grid.
+        This function does NOT create a new grid.
 
-        It only converts the already-trained grid into a
-        format that Numba can evaluate quickly.
+        It only converts the existing training grid into
+        NumPy arrays suitable for fast evaluation.
+
+    The grid cells are converted into uint64 lookup keys.
+
+    uint64 is used deliberately because the normal flattened
+    coordinate can become larger than signed int64.
     """
 
     grid_configuration = (
@@ -473,6 +527,10 @@ def prepare_training_grid(
         .reset_index(drop=True)
     )
 
+    # ========================================================
+    # GRID CONFIGURATION
+    # ========================================================
+
     input_names = (
         grid_configuration[
             "input_name"
@@ -485,7 +543,7 @@ def prepare_training_grid(
             "bin_count"
         ]
         .to_numpy(
-            dtype=np.int64
+            dtype=np.uint64
         )
     )
 
@@ -507,46 +565,50 @@ def prepare_training_grid(
         )
     )
 
-    # --------------------------------------------------------
-    # Calculate flattened coordinate for every populated
-    # training grid cell.
-    #
-    # Example:
-    #
-    # dim_0 = 2
-    # dim_1 = 5
-    # dim_2 = 1
-    #
-    # Flattened:
-    #
-    # ((2 * bin_count_1) + 5) * bin_count_2 + 1
-    # --------------------------------------------------------
+    # ========================================================
+    # BUILD UINT64 GRID KEYS
+    # ========================================================
 
     dimensions = np.zeros(
         len(grid_data),
-        dtype=np.int64,
+        dtype=np.uint64,
+    )
+
+    num_dimensions = len(
+        bin_counts
     )
 
     for row_index in range(
         len(grid_data)
     ):
 
-        flattened = 0
+        key = np.uint64(0)
 
         for dimension in range(
-            len(bin_counts)
+            num_dimensions
         ):
 
-            coordinate = int(
-                grid_data.iloc[
-                    row_index
-                ][
-                    f"dim_{dimension}"
-                ]
+            coordinate = np.uint64(
+                int(
+                    grid_data.iloc[
+                        row_index
+                    ][
+                        f"dim_{dimension}"
+                    ]
+                )
             )
 
-            flattened = (
-                flattened
+            # ------------------------------------------------
+            # UINT64 arithmetic intentionally wraps.
+            #
+            # This prevents signed integer overflow.
+            #
+            # The exact same operation is performed during
+            # evaluation, so the lookup key remains identical.
+            # ------------------------------------------------
+
+            key = (
+                key
                 * bin_counts[
                     dimension
                 ]
@@ -555,7 +617,24 @@ def prepare_training_grid(
 
         dimensions[
             row_index
-        ] = flattened
+        ] = key
+
+    # ========================================================
+    # SORT GRID KEYS
+    #
+    # This allows Numba to use binary search instead of
+    # scanning every grid cell.
+    # ========================================================
+
+    sort_order = np.argsort(
+        dimensions
+    )
+
+    dimensions = (
+        dimensions[
+            sort_order
+        ]
+    )
 
     total_trades = (
         grid_data[
@@ -563,7 +642,9 @@ def prepare_training_grid(
         ]
         .to_numpy(
             dtype=np.float64
-        )
+        )[
+            sort_order
+        ]
     )
 
     total_wins = (
@@ -572,7 +653,9 @@ def prepare_training_grid(
         ]
         .to_numpy(
             dtype=np.float64
-        )
+        )[
+            sort_order
+        ]
     )
 
     return (
@@ -766,48 +849,18 @@ def evaluate_strategy(
         selected_mask,
         equity,
     ) = _evaluate_grid_trades(
-        input_values=(
-            input_values
-        ),
-        input_valid=(
-            input_valid
-        ),
-        input_row_indices=(
-            input_row_indices
-        ),
-        rr_returns=(
-            rr_returns
-        ),
-        rr_time_elapsed=(
-            rr_time_elapsed
-        ),
-        grid_inputs=(
-            np.empty(
-                0,
-                dtype=np.float64,
-            )
-        ),
-        grid_bin_counts=(
-            bin_counts
-        ),
-        grid_bin_sizes=(
-            bin_sizes
-        ),
-        grid_mins=(
-            mins
-        ),
-        grid_dimensions=(
-            grid_dimensions
-        ),
-        grid_total_trades=(
-            grid_total_trades
-        ),
-        grid_total_wins=(
-            grid_total_wins
-        ),
-        win_rate_threshold=(
-            WIN_RATE_THRESHOLD
-        ),
+        input_values=input_values,
+        input_valid=input_valid,
+        input_row_indices=input_row_indices,
+        rr_returns=rr_returns,
+        rr_time_elapsed=rr_time_elapsed,
+        grid_bin_counts=bin_counts,
+        grid_bin_sizes=bin_sizes,
+        grid_mins=mins,
+        grid_dimensions=grid_dimensions,
+        grid_total_trades=grid_total_trades,
+        grid_total_wins=grid_total_wins,
+        win_rate_threshold=WIN_RATE_THRESHOLD,
     )
 
     # ========================================================

@@ -714,117 +714,46 @@ def download_input_statistics(symbol):
     )
 
 
-
-# ============================================================
-# DOWNLOAD ALL RISK / REWARD DATA FOR A STOCK + TRADE TYPE
-# ============================================================
-
 def download_risk_reward_data(
     symbol,
     trade_type,
+    stop_loss_percentage,
+    risk_reward_ratio,
 ):
     """
-    Download every risk/reward parquet file for a stock
-    and trade type.
+    Download one previously generated risk/reward dataset.
 
-    Example:
+    R2 filename format:
 
-        riskreward/DELL/long/
-        riskreward/DELL/short/
-
-    Returns:
-        dict
-
-    Keys are the filenames without .parquet.
-
-    Example:
-
-        {
-            "sl_0.5_rr_1.0": DataFrame,
-            "sl_0.5_rr_1.5": DataFrame,
-            "sl_1.0_rr_1.0": DataFrame,
-            ...
-        }
+        riskreward/DELL/long/sl_0.5_rr_1.0.parquet
     """
 
-    prefix = (
+    # Explicitly convert to strings matching the actual R2 filenames.
+    sl_string = str(float(stop_loss_percentage))
+    rr_string = str(float(risk_reward_ratio))
+
+    key = (
         f"{RISK_REWARD_PATH}/"
-        f"{symbol}/"
-        f"{trade_type}/"
+        f"{str(symbol)}/"
+        f"{str(trade_type)}/"
+        f"sl_{sl_string}_"
+        f"rr_{rr_string}.parquet"
     )
 
     print(
-        f"Downloading all Risk Reward data | "
-        f"prefix={prefix}"
+        f"Downloading Risk Reward data | key={key}"
     )
 
-    paginator = s3.get_paginator(
-        "list_objects_v2"
-    )
-
-    datasets = {}
-
-    for page in paginator.paginate(
+    response = s3.get_object(
         Bucket=R2_BUCKET_NAME,
-        Prefix=prefix,
-    ):
-
-        contents = page.get(
-            "Contents",
-            [],
-        )
-
-        for obj in contents:
-
-            key = obj["Key"]
-
-            if not key.endswith(
-                ".parquet"
-            ):
-                continue
-
-            print(
-                f"Downloading Risk Reward data | "
-                f"key={key}"
-            )
-
-            response = s3.get_object(
-                Bucket=R2_BUCKET_NAME,
-                Key=key,
-            )
-
-            data = (
-                response["Body"]
-                .read()
-            )
-
-            dataframe = pd.read_parquet(
-                io.BytesIO(data)
-            )
-
-            filename = (
-                key
-                .rsplit("/", 1)[-1]
-                .replace(
-                    ".parquet",
-                    "",
-                )
-            )
-
-            datasets[
-                filename
-            ] = dataframe
-
-    print(
-        f"Risk Reward data downloaded | "
-        f"symbol={symbol} | "
-        f"trade_type={trade_type} | "
-        f"files={len(datasets)}"
+        Key=key,
     )
 
-    return datasets
+    data = response["Body"].read()
 
-
+    return pd.read_parquet(
+        io.BytesIO(data)
+    )
 
 
 # ============================================================

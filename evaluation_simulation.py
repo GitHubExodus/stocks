@@ -29,18 +29,18 @@ TRADE_TYPES = [
 
 STOP_LOSS_PERCENTAGES = [
     0.5,
-    1,
-    2,
-    3,
-    5,
+    1.0,
+    2.0,
+    3.0,
+    5.0,
 ]
 
 RISK_REWARD_RATIOS = [
-    1,
+    1.0,
     1.5,
-    2,
-    3,
-    5,
+    2.0,
+    3.0,
+    5.0,
 ]
 
 

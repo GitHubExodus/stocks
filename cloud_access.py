@@ -714,49 +714,117 @@ def download_input_statistics(symbol):
     )
 
 
+
 # ============================================================
-# DOWNLOAD RISK / REWARD DATA
+# DOWNLOAD ALL RISK / REWARD DATA FOR A STOCK + TRADE TYPE
 # ============================================================
 
 def download_risk_reward_data(
     symbol,
     trade_type,
-    stop_loss_percentage,
-    risk_reward_ratio,
 ):
     """
-    Download one previously generated risk/reward dataset.
+    Download every risk/reward parquet file for a stock
+    and trade type.
 
     Example:
-        riskreward/DELL/long/sl_0.5_rr_1.parquet
+
+        riskreward/DELL/long/
+        riskreward/DELL/short/
+
+    Returns:
+        dict
+
+    Keys are the filenames without .parquet.
+
+    Example:
+
+        {
+            "sl_0.5_rr_1.0": DataFrame,
+            "sl_0.5_rr_1.5": DataFrame,
+            "sl_1.0_rr_1.0": DataFrame,
+            ...
+        }
     """
 
-    sl_string = _format_strategy_number(
-        stop_loss_percentage
-    )
-
-    rr_string = _format_strategy_number(
-        risk_reward_ratio
-    )
-
-    key = (
+    prefix = (
         f"{RISK_REWARD_PATH}/"
         f"{symbol}/"
         f"{trade_type}/"
-        f"sl_{sl_string}_"
-        f"rr_{rr_string}.parquet"
     )
 
-    response = s3.get_object(
+    print(
+        f"Downloading all Risk Reward data | "
+        f"prefix={prefix}"
+    )
+
+    paginator = s3.get_paginator(
+        "list_objects_v2"
+    )
+
+    datasets = {}
+
+    for page in paginator.paginate(
         Bucket=R2_BUCKET_NAME,
-        Key=key,
+        Prefix=prefix,
+    ):
+
+        contents = page.get(
+            "Contents",
+            [],
+        )
+
+        for obj in contents:
+
+            key = obj["Key"]
+
+            if not key.endswith(
+                ".parquet"
+            ):
+                continue
+
+            print(
+                f"Downloading Risk Reward data | "
+                f"key={key}"
+            )
+
+            response = s3.get_object(
+                Bucket=R2_BUCKET_NAME,
+                Key=key,
+            )
+
+            data = (
+                response["Body"]
+                .read()
+            )
+
+            dataframe = pd.read_parquet(
+                io.BytesIO(data)
+            )
+
+            filename = (
+                key
+                .rsplit("/", 1)[-1]
+                .replace(
+                    ".parquet",
+                    "",
+                )
+            )
+
+            datasets[
+                filename
+            ] = dataframe
+
+    print(
+        f"Risk Reward data downloaded | "
+        f"symbol={symbol} | "
+        f"trade_type={trade_type} | "
+        f"files={len(datasets)}"
     )
 
-    data = response["Body"].read()
+    return datasets
 
-    return pd.read_parquet(
-        io.BytesIO(data)
-    )
+
 
 
 # ============================================================

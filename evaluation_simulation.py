@@ -880,8 +880,10 @@ def main():
         f"symbol={SYMBOL}"
     )
 
-    input_data = download_input_data(
-        SYMBOL
+    input_data = (
+        download_input_data(
+            SYMBOL
+        )
     )
 
     log(
@@ -891,38 +893,10 @@ def main():
     )
 
     # ========================================================
-    # PROCESS EACH TRADE TYPE
+    # EVERY STRATEGY
     # ========================================================
 
     for trade_type in TRADE_TYPES:
-
-        # ====================================================
-        # DOWNLOAD ALL RR DATA FOR THIS TRADE TYPE ONCE
-        # ====================================================
-
-        log(
-            f"Downloading all Risk Reward data | "
-            f"symbol={SYMBOL} | "
-            f"trade_type={trade_type}"
-        )
-
-        risk_reward_datasets = (
-            download_risk_reward_data(
-                symbol=SYMBOL,
-                trade_type=trade_type,
-            )
-        )
-
-        log(
-            f"Risk Reward data loaded | "
-            f"symbol={SYMBOL} | "
-            f"trade_type={trade_type} | "
-            f"files={len(risk_reward_datasets)}"
-        )
-
-        # ====================================================
-        # EVERY STRATEGY
-        # ====================================================
 
         for stop_loss_percentage in (
             STOP_LOSS_PERCENTAGES
@@ -941,38 +915,26 @@ def main():
                 )
 
                 # =================================================
-                # FIND RR DATA IN DOWNLOADED DATA
+                # DOWNLOAD RR DATA
                 # =================================================
 
-                rr_key = (
-                    f"sl_{float(stop_loss_percentage):.1f}_"
-                    f"rr_{float(risk_reward_ratio):.1f}"
-                )
-
-                if rr_key not in risk_reward_datasets:
-
-                    raise KeyError(
-                        f"Risk Reward dataset not found | "
-                        f"key={rr_key} | "
-                        f"available={list(risk_reward_datasets.keys())}"
-                    )
-
                 risk_reward_data = (
-                    risk_reward_datasets[
-                        rr_key
-                    ]
-                )
-
-                log(
-                    f"Risk Reward dataset selected | "
-                    f"key={rr_key} | "
-                    f"rows={len(risk_reward_data):,}"
+                    download_risk_reward_data(
+                        symbol=SYMBOL,
+                        trade_type=trade_type,
+                        stop_loss_percentage=(
+                            stop_loss_percentage
+                        ),
+                        risk_reward_ratio=(
+                            risk_reward_ratio
+                        ),
+                    )
                 )
 
                 # =================================================
                 # DOWNLOAD TRAINING GRID CONFIGURATION
                 #
-                # ONLY TRAINING GRID
+                # ONLY TRAINING IS USED.
                 # =================================================
 
                 grid_configuration = (
@@ -992,7 +954,7 @@ def main():
                 # =================================================
                 # DOWNLOAD TRAINING GRID CELLS
                 #
-                # ONLY TRAINING GRID
+                # ONLY TRAINING IS USED.
                 # =================================================
 
                 grid_data = (
@@ -1024,14 +986,18 @@ def main():
 
                 equity_curve = (
                     evaluate_strategy(
-                        input_data=input_data,
+                        input_data=(
+                            input_data
+                        ),
                         risk_reward_data=(
                             risk_reward_data
                         ),
                         grid_configuration=(
                             grid_configuration
                         ),
-                        grid_data=grid_data,
+                        grid_data=(
+                            grid_data
+                        ),
                     )
                 )
 
@@ -1048,7 +1014,9 @@ def main():
                     risk_reward_ratio=(
                         risk_reward_ratio
                     ),
-                    equity_curve=equity_curve,
+                    equity_curve=(
+                        equity_curve
+                    ),
                 )
 
                 log(
@@ -1064,6 +1032,7 @@ def main():
         f"EVALUATION COMPLETE | "
         f"SYMBOL={SYMBOL}"
     )
+
 
 if __name__ == "__main__":
     main()

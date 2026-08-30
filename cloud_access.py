@@ -725,19 +725,19 @@ def download_risk_reward_data(
     """
     Download one previously generated risk/reward dataset.
 
-    Primary format:
-
-        riskreward/DELL/long/sl_0.5_rr_1.0.parquet
-
-    Also tries the alternate:
-
+    Example:
         riskreward/DELL/long/sl_0.5_rr_1.parquet
     """
 
-    sl_string = str(float(stop_loss_percentage))
-    rr_string = str(float(risk_reward_ratio))
+    sl_string = _format_strategy_number(
+        stop_loss_percentage
+    )
 
-    primary_key = (
+    rr_string = _format_strategy_number(
+        risk_reward_ratio
+    )
+
+    key = (
         f"{RISK_REWARD_PATH}/"
         f"{symbol}/"
         f"{trade_type}/"
@@ -745,96 +745,16 @@ def download_risk_reward_data(
         f"rr_{rr_string}.parquet"
     )
 
-    # ============================================================
-    # TRY PRIMARY KEY
-    # ============================================================
-
-    print(
-        f"Downloading Risk Reward data | "
-        f"key={primary_key}"
+    response = s3.get_object(
+        Bucket=R2_BUCKET_NAME,
+        Key=key,
     )
 
-    try:
+    data = response["Body"].read()
 
-        response = s3.get_object(
-            Bucket=R2_BUCKET_NAME,
-            Key=primary_key,
-        )
-
-        data = response["Body"].read()
-
-        return pd.read_parquet(
-            io.BytesIO(data)
-        )
-
-    except s3.exceptions.ClientError as error:
-
-        error_code = (
-            error.response["Error"]["Code"]
-        )
-
-        if error_code not in (
-            "404",
-            "NoSuchKey",
-        ):
-            raise
-
-    # ============================================================
-    # TRY ALTERNATE INTEGER FORMAT
-    # ============================================================
-
-    sl_alt = _format_strategy_number(
-        stop_loss_percentage
+    return pd.read_parquet(
+        io.BytesIO(data)
     )
-
-    rr_alt = _format_strategy_number(
-        risk_reward_ratio
-    )
-
-    alternate_key = (
-        f"{RISK_REWARD_PATH}/"
-        f"{symbol}/"
-        f"{trade_type}/"
-        f"sl_{sl_alt}_"
-        f"rr_{rr_alt}.parquet"
-    )
-
-    print(
-        f"Primary key not found. "
-        f"Trying alternate key={alternate_key}"
-    )
-
-    try:
-
-        response = s3.get_object(
-            Bucket=R2_BUCKET_NAME,
-            Key=alternate_key,
-        )
-
-        data = response["Body"].read()
-
-        return pd.read_parquet(
-            io.BytesIO(data)
-        )
-
-    except s3.exceptions.ClientError as error:
-
-        error_code = (
-            error.response["Error"]["Code"]
-        )
-
-        if error_code not in (
-            "404",
-            "NoSuchKey",
-        ):
-            raise
-
-        raise FileNotFoundError(
-            f"Risk Reward file does not exist in R2.\n"
-            f"Tried:\n"
-            f"  {primary_key}\n"
-            f"  {alternate_key}"
-        )
 
 
 # ============================================================
@@ -851,19 +771,15 @@ def download_grid_configuration(
     """
     Download a grid configuration.
 
-    Defaults to the training grid.
+    Uses the exact filename format used when
+    the grid was saved.
 
     Example:
-        grid/DELL/long/sl_0.5_rr_1/training/grid_config.parquet
+        grid/DELL/long/sl_0.5_rr_1.0/training/grid_config.parquet
     """
 
-    sl_string = _format_strategy_number(
-        stop_loss_percentage
-    )
-
-    rr_string = _format_strategy_number(
-        risk_reward_ratio
-    )
+    sl_string = str(float(stop_loss_percentage))
+    rr_string = str(float(risk_reward_ratio))
 
     key = (
         f"{GRID_PATH}/"
@@ -901,19 +817,17 @@ def download_grid_data(
     """
     Download populated grid cells.
 
+    Uses the exact filename format used when
+    the grid was saved.
+
     Defaults to the training grid.
 
     Example:
-        grid/DELL/long/sl_0.5_rr_1/training/grid_cells.parquet
+        grid/DELL/long/sl_0.5_rr_1.0/training/grid_cells.parquet
     """
 
-    sl_string = _format_strategy_number(
-        stop_loss_percentage
-    )
-
-    rr_string = _format_strategy_number(
-        risk_reward_ratio
-    )
+    sl_string = str(float(stop_loss_percentage))
+    rr_string = str(float(risk_reward_ratio))
 
     key = (
         f"{GRID_PATH}/"

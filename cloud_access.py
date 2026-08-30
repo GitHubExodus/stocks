@@ -599,3 +599,342 @@ def save_grid_data(
         Body=buffer.getvalue(),
         ContentType="application/octet-stream",
     )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ============================================================
+# STRATEGY NUMBER FORMATTER
+# ============================================================
+
+def _format_strategy_number(value):
+    """
+    Format strategy numbers exactly like the original
+    risk/reward and grid files were saved.
+
+    Examples:
+        1       -> "1"
+        1.0     -> "1"
+        1.5     -> "1.5"
+        0.5     -> "0.5"
+        5.0     -> "5"
+    """
+
+    value = float(value)
+
+    if value.is_integer():
+        return str(int(value))
+
+    return str(value)
+
+
+# ============================================================
+# DOWNLOAD INPUT DATA
+# ============================================================
+
+def download_input_data(symbol):
+    """
+    Download previously generated input data.
+
+    Example:
+        input/DELL.parquet
+    """
+
+    key = (
+        f"{INPUT_PATH}/{symbol}.parquet"
+    )
+
+    response = s3.get_object(
+        Bucket=R2_BUCKET_NAME,
+        Key=key,
+    )
+
+    data = response["Body"].read()
+
+    return pd.read_parquet(
+        io.BytesIO(data)
+    )
+
+
+# ============================================================
+# DOWNLOAD INPUT STATISTICS
+# ============================================================
+
+def download_input_statistics(symbol):
+    """
+    Download previously generated input statistics.
+
+    Example:
+        input_statistics/DELL.parquet
+    """
+
+    key = (
+        f"{INPUT_STATISTICS_PATH}/{symbol}.parquet"
+    )
+
+    response = s3.get_object(
+        Bucket=R2_BUCKET_NAME,
+        Key=key,
+    )
+
+    data = response["Body"].read()
+
+    return pd.read_parquet(
+        io.BytesIO(data)
+    )
+
+
+# ============================================================
+# DOWNLOAD RISK / REWARD DATA
+# ============================================================
+
+def download_risk_reward_data(
+    symbol,
+    trade_type,
+    stop_loss_percentage,
+    risk_reward_ratio,
+):
+    """
+    Download one previously generated risk/reward dataset.
+
+    Example:
+        riskreward/DELL/long/sl_0.5_rr_1.parquet
+    """
+
+    sl_string = _format_strategy_number(
+        stop_loss_percentage
+    )
+
+    rr_string = _format_strategy_number(
+        risk_reward_ratio
+    )
+
+    key = (
+        f"{RISK_REWARD_PATH}/"
+        f"{symbol}/"
+        f"{trade_type}/"
+        f"sl_{sl_string}_"
+        f"rr_{rr_string}.parquet"
+    )
+
+    response = s3.get_object(
+        Bucket=R2_BUCKET_NAME,
+        Key=key,
+    )
+
+    data = response["Body"].read()
+
+    return pd.read_parquet(
+        io.BytesIO(data)
+    )
+
+
+# ============================================================
+# DOWNLOAD GRID CONFIGURATION
+# ============================================================
+
+def download_grid_configuration(
+    symbol,
+    trade_type,
+    stop_loss_percentage,
+    risk_reward_ratio,
+    dataset="training",
+):
+    """
+    Download a grid configuration.
+
+    Defaults to the training grid.
+
+    Example:
+        grid/DELL/long/sl_0.5_rr_1/training/grid_config.parquet
+    """
+
+    sl_string = _format_strategy_number(
+        stop_loss_percentage
+    )
+
+    rr_string = _format_strategy_number(
+        risk_reward_ratio
+    )
+
+    key = (
+        f"{GRID_PATH}/"
+        f"{symbol}/"
+        f"{trade_type}/"
+        f"sl_{sl_string}_"
+        f"rr_{rr_string}/"
+        f"{dataset}/"
+        f"grid_config.parquet"
+    )
+
+    response = s3.get_object(
+        Bucket=R2_BUCKET_NAME,
+        Key=key,
+    )
+
+    data = response["Body"].read()
+
+    return pd.read_parquet(
+        io.BytesIO(data)
+    )
+
+
+# ============================================================
+# DOWNLOAD GRID DATA
+# ============================================================
+
+def download_grid_data(
+    symbol,
+    trade_type,
+    stop_loss_percentage,
+    risk_reward_ratio,
+    dataset="training",
+):
+    """
+    Download populated grid cells.
+
+    Defaults to the training grid.
+
+    Example:
+        grid/DELL/long/sl_0.5_rr_1/training/grid_cells.parquet
+    """
+
+    sl_string = _format_strategy_number(
+        stop_loss_percentage
+    )
+
+    rr_string = _format_strategy_number(
+        risk_reward_ratio
+    )
+
+    key = (
+        f"{GRID_PATH}/"
+        f"{symbol}/"
+        f"{trade_type}/"
+        f"sl_{sl_string}_"
+        f"rr_{rr_string}/"
+        f"{dataset}/"
+        f"grid_cells.parquet"
+    )
+
+    response = s3.get_object(
+        Bucket=R2_BUCKET_NAME,
+        Key=key,
+    )
+
+    data = response["Body"].read()
+
+    return pd.read_parquet(
+        io.BytesIO(data)
+    )
+
+
+# ============================================================
+# SAVE EVALUATION EQUITY CURVE
+# ============================================================
+
+EVALUATION_PATH = "evaluate"
+
+
+def save_evaluation_equity_curve(
+    symbol,
+    trade_type,
+    stop_loss_percentage,
+    risk_reward_ratio,
+    equity_curve,
+):
+    """
+    Save an evaluation equity curve.
+
+    Example:
+        evaluate/DELL/long/sl_0.5_rr_1/equity_curve.parquet
+
+    Existing files are overwritten.
+    """
+
+    sl_string = _format_strategy_number(
+        stop_loss_percentage
+    )
+
+    rr_string = _format_strategy_number(
+        risk_reward_ratio
+    )
+
+    stock_folder = (
+        f"{EVALUATION_PATH}/{symbol}"
+    )
+
+    trade_folder = (
+        f"{stock_folder}/{trade_type}"
+    )
+
+    strategy_folder = (
+        f"{trade_folder}/"
+        f"sl_{sl_string}_"
+        f"rr_{rr_string}"
+    )
+
+    ensure_r2_folder(
+        EVALUATION_PATH
+    )
+
+    ensure_r2_folder(
+        stock_folder
+    )
+
+    ensure_r2_folder(
+        trade_folder
+    )
+
+    ensure_r2_folder(
+        strategy_folder
+    )
+
+    key = (
+        f"{strategy_folder}/"
+        f"equity_curve.parquet"
+    )
+
+    buffer = io.BytesIO()
+
+    equity_curve.to_parquet(
+        buffer,
+        index=False,
+    )
+
+    buffer.seek(0)
+
+    s3.put_object(
+        Bucket=R2_BUCKET_NAME,
+        Key=key,
+        Body=buffer.getvalue(),
+        ContentType="application/octet-stream",
+    )

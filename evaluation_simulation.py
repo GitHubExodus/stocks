@@ -181,7 +181,7 @@ def _evaluate_grid_trades(
     grid_bin_counts,
     grid_bin_sizes,
     grid_mins,
-    grid_dimensions,
+    grid_coordinates,
     grid_total_trades,
     grid_total_wins,
     win_rate_threshold,
@@ -191,23 +191,11 @@ def _evaluate_grid_trades(
 
     ONLY the training grid is used.
 
-    No validation grid is created.
-    No grid is modified.
-    No new statistics are calculated.
+    Grid lookup uses direct coordinate comparison.
 
-    Grid lookup:
+    No flattened integer is created.
 
-        1. Calculate input coordinates.
-        2. Convert coordinates into a uint64 key.
-        3. Binary-search the sorted training-grid keys.
-        4. Read training Total_Trades / Total_Wins.
-        5. Calculate training win rate.
-        6. Select the trade if the training win rate
-           is above the threshold.
-        7. Compound equity.
-
-    uint64 is used for the grid key so large combinations
-    of dimensions do not cause signed int64 overflow.
+    Therefore there is no integer overflow.
     """
 
     num_rr = len(
@@ -219,7 +207,7 @@ def _evaluate_grid_trades(
     )
 
     num_grid_cells = len(
-        grid_dimensions
+        grid_coordinates
     )
 
     selected_mask = np.zeros(
@@ -247,20 +235,23 @@ def _evaluate_grid_trades(
         if input_index < 0:
             continue
 
-        # ----------------------------------------------------
-        # Validate input row.
-        # ----------------------------------------------------
+        # ====================================================
+        # VALIDATE INPUT ROW
+        # ====================================================
 
         if not input_valid[
             input_index
         ]:
             continue
 
-        # ----------------------------------------------------
-        # BUILD UINT64 GRID KEY
-        # ----------------------------------------------------
+        # ====================================================
+        # CALCULATE GRID COORDINATE
+        # ====================================================
 
-        grid_key = np.uint64(0)
+        coordinates = np.empty(
+            num_dimensions,
+            dtype=np.int64,
+        )
 
         valid_coordinate = True
 
@@ -297,13 +288,9 @@ def _evaluate_grid_trades(
                 ]
             )
 
-            if bin_count == 0:
+            if bin_count <= 0:
                 valid_coordinate = False
                 break
-
-            # ------------------------------------------------
-            # Calculate coordinate.
-            # ------------------------------------------------
 
             if bin_size <= 0.0:
 
@@ -325,40 +312,24 @@ def _evaluate_grid_trades(
 
                     coordinate = 0
 
-                elif coordinate >= int(
-                    bin_count
-                ):
+                elif coordinate >= bin_count:
 
                     coordinate = (
-                        int(bin_count)
+                        bin_count
                         - 1
                     )
 
-            # ------------------------------------------------
-            # Convert coordinate to uint64.
-            # ------------------------------------------------
-
-            coordinate_uint = np.uint64(
-                coordinate
-            )
-
-            # ------------------------------------------------
-            # UINT64 WRAPPING KEY
-            #
-            # This avoids signed integer overflow.
-            # ------------------------------------------------
-
-            grid_key = (
-                grid_key
-                * bin_count
-                + coordinate_uint
-            )
+            coordinates[
+                dimension
+            ] = coordinate
 
         if not valid_coordinate:
             continue
 
         # ====================================================
-        # BINARY SEARCH TRAINING GRID
+        # BINARY SEARCH
+        #
+        # Search the sorted TRAINING GRID coordinates.
         # ====================================================
 
         left = 0
@@ -373,12 +344,49 @@ def _evaluate_grid_trades(
                 ) // 2
             )
 
-            if (
-                grid_dimensions[
-                    middle
-                ]
-                < grid_key
+            # ------------------------------------------------
+            # Lexicographic comparison:
+            #
+            # training coordinate < target coordinate
+            # ------------------------------------------------
+
+            training_less = False
+            training_greater = False
+
+            for dimension in range(
+                num_dimensions
             ):
+
+                training_value = (
+                    grid_coordinates[
+                        middle,
+                        dimension
+                    ]
+                )
+
+                target_value = (
+                    coordinates[
+                        dimension
+                    ]
+                )
+
+                if (
+                    training_value
+                    < target_value
+                ):
+
+                    training_less = True
+                    break
+
+                elif (
+                    training_value
+                    > target_value
+                ):
+
+                    training_greater = True
+                    break
+
+            if training_less:
 
                 left = (
                     middle + 1
@@ -390,19 +398,33 @@ def _evaluate_grid_trades(
 
         cell_index = left
 
-        # ----------------------------------------------------
-        # Key does not exist.
-        # ----------------------------------------------------
+        # ====================================================
+        # VERIFY EXACT MATCH
+        # ====================================================
 
         if cell_index >= num_grid_cells:
             continue
 
-        if (
-            grid_dimensions[
-                cell_index
-            ]
-            != grid_key
+        exact_match = True
+
+        for dimension in range(
+            num_dimensions
         ):
+
+            if (
+                grid_coordinates[
+                    cell_index,
+                    dimension
+                ]
+                != coordinates[
+                    dimension
+                ]
+            ):
+
+                exact_match = False
+                break
+
+        if not exact_match:
             continue
 
         # ====================================================
@@ -491,10 +513,6 @@ def _evaluate_grid_trades(
 # PREPARE TRAINING GRID
 # ============================================================
 
-# ============================================================
-# PREPARE TRAINING GRID
-# ============================================================
-
 def prepare_training_grid(
     grid_configuration,
     grid_data,
@@ -502,17 +520,13 @@ def prepare_training_grid(
     """
     Prepare the FROZEN TRAINING GRID for fast Numba lookup.
 
-    IMPORTANT:
+    ONLY the training grid is used.
 
-        This function does NOT create a new grid.
+    No grid is created.
+    No grid is modified.
 
-        It only converts the existing training grid into
-        NumPy arrays suitable for fast evaluation.
-
-    The grid cells are converted into uint64 lookup keys.
-
-    uint64 is used deliberately because the normal flattened
-    coordinate can become larger than signed int64.
+    Grid coordinates are stored directly instead of being
+    flattened into a potentially overflowing integer.
     """
 
     grid_configuration = (
@@ -543,7 +557,7 @@ def prepare_training_grid(
             "bin_count"
         ]
         .to_numpy(
-            dtype=np.uint64
+            dtype=np.int64
         )
     )
 
@@ -566,75 +580,79 @@ def prepare_training_grid(
     )
 
     # ========================================================
-    # BUILD UINT64 GRID KEYS
+    # GRID COORDINATES
     # ========================================================
 
-    dimensions = np.zeros(
-        len(grid_data),
-        dtype=np.uint64,
+    num_grid_cells = len(
+        grid_data
     )
 
     num_dimensions = len(
         bin_counts
     )
 
-    for row_index in range(
-        len(grid_data)
-    ):
-
-        key = np.uint64(0)
-
-        for dimension in range(
-            num_dimensions
-        ):
-
-            coordinate = np.uint64(
-                int(
-                    grid_data.iloc[
-                        row_index
-                    ][
-                        f"dim_{dimension}"
-                    ]
-                )
-            )
-
-            # ------------------------------------------------
-            # UINT64 arithmetic intentionally wraps.
-            #
-            # This prevents signed integer overflow.
-            #
-            # The exact same operation is performed during
-            # evaluation, so the lookup key remains identical.
-            # ------------------------------------------------
-
-            key = (
-                key
-                * bin_counts[
-                    dimension
-                ]
-                + coordinate
-            )
-
-        dimensions[
-            row_index
-        ] = key
-
-    # ========================================================
-    # SORT GRID KEYS
-    #
-    # This allows Numba to use binary search instead of
-    # scanning every grid cell.
-    # ========================================================
-
-    sort_order = np.argsort(
-        dimensions
+    grid_coordinates = np.empty(
+        (
+            num_grid_cells,
+            num_dimensions,
+        ),
+        dtype=np.int64,
     )
 
-    dimensions = (
-        dimensions[
+    for dimension in range(
+        num_dimensions
+    ):
+
+        grid_coordinates[
+            :,
+            dimension
+        ] = (
+            grid_data[
+                f"dim_{dimension}"
+            ]
+            .to_numpy(
+                dtype=np.int64
+            )
+        )
+
+    # ========================================================
+    # SORT GRID COORDINATES
+    #
+    # np.lexsort sorts by the last key first.
+    #
+    # This gives us:
+    #
+    # dim_0
+    # dim_1
+    # dim_2
+    # ...
+    #
+    # lexicographic ordering.
+    # ========================================================
+
+    sort_keys = tuple(
+        grid_coordinates[
+            :,
+            dimension
+        ]
+        for dimension in reversed(
+            range(num_dimensions)
+        )
+    )
+
+    sort_order = np.lexsort(
+        sort_keys
+    )
+
+    grid_coordinates = (
+        grid_coordinates[
             sort_order
         ]
     )
+
+    # ========================================================
+    # TRAINING GRID STATISTICS
+    # ========================================================
 
     total_trades = (
         grid_data[
@@ -663,11 +681,10 @@ def prepare_training_grid(
         bin_counts,
         bin_sizes,
         mins,
-        dimensions,
+        grid_coordinates,
         total_trades,
         total_wins,
     )
-
 
 # ============================================================
 # EVALUATE ONE STRATEGY
@@ -787,16 +804,12 @@ def evaluate_strategy(
         bin_counts,
         bin_sizes,
         mins,
-        grid_dimensions,
+        grid_coordinates,
         grid_total_trades,
         grid_total_wins,
     ) = prepare_training_grid(
-        grid_configuration=(
-            grid_configuration
-        ),
-        grid_data=(
-            grid_data
-        ),
+        grid_configuration=grid_configuration,
+        grid_data=grid_data,
     )
 
     # ========================================================
@@ -857,7 +870,7 @@ def evaluate_strategy(
         grid_bin_counts=bin_counts,
         grid_bin_sizes=bin_sizes,
         grid_mins=mins,
-        grid_dimensions=grid_dimensions,
+        grid_coordinates=grid_coordinates,
         grid_total_trades=grid_total_trades,
         grid_total_wins=grid_total_wins,
         win_rate_threshold=WIN_RATE_THRESHOLD,

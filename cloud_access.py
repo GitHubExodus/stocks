@@ -635,25 +635,27 @@ def save_grid_data(
 # STRATEGY NUMBER FORMATTER
 # ============================================================
 
+
+# ============================================================
+# STRATEGY NUMBER FORMATTER
+# ============================================================
+
 def _format_strategy_number(value):
     """
-    Format strategy numbers exactly like the original
-    risk/reward and grid files were saved.
+    Format strategy numbers exactly as stored in R2.
 
     Examples:
-        1       -> "1"
-        1.0     -> "1"
+        1       -> "1.0"
+        1.0     -> "1.0"
         1.5     -> "1.5"
         0.5     -> "0.5"
-        5.0     -> "5"
+        5       -> "5.0"
+        5.0     -> "5.0"
     """
 
-    value = float(value)
+    return f"{float(value):.1f}"
 
-    if value.is_integer():
-        return str(int(value))
 
-    return str(value)
 
 
 # ============================================================

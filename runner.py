@@ -36,7 +36,7 @@ def get_bin_count(input_name):
     # --------------------------------------------------------
 
     if "dollar_volume" in input_name:
-        return 40
+        return 5
 
     # --------------------------------------------------------
     # Minutes
@@ -46,7 +46,7 @@ def get_bin_count(input_name):
         input_name == "current_time"
         or "minutes_away" in input_name
     ):
-        return 32
+        return 4
 
     # --------------------------------------------------------
     # Percentage values
@@ -62,13 +62,13 @@ def get_bin_count(input_name):
         or "pivot_high_distance" in input_name
         or "pivot_low_distance" in input_name
     ):
-        return 20
+        return 3
 
     # --------------------------------------------------------
     # Everything else
     # --------------------------------------------------------
 
-    return 15
+    return 2
 
 
 def create_bin_counts(input_statistics):

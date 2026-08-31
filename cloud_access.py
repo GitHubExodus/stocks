@@ -931,3 +931,328 @@ def save_evaluation_equity_curve(
         Body=buffer.getvalue(),
         ContentType="application/octet-stream",
     )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ============================================================
+# XGBOOST DATA
+# ============================================================
+
+XGBOOST_DATA_PATH = "xgboost_data"
+
+
+def save_xgboost_data(
+    symbol,
+    trade_type,
+    stop_loss_percentage,
+    risk_reward_ratio,
+    xgboost_data,
+):
+    """
+    Save prepared XGBoost training data.
+
+    Example:
+
+        xgboost_data/DELL/long/
+            sl_1.0_rr_2.0.parquet
+    """
+
+    stock_folder = (
+        f"{XGBOOST_DATA_PATH}/{symbol}"
+    )
+
+    trade_folder = (
+        f"{stock_folder}/{trade_type}"
+    )
+
+    ensure_r2_folder(
+        XGBOOST_DATA_PATH
+    )
+
+    ensure_r2_folder(
+        stock_folder
+    )
+
+    ensure_r2_folder(
+        trade_folder
+    )
+
+    filename = (
+        f"sl_{float(stop_loss_percentage)}_"
+        f"rr_{float(risk_reward_ratio)}.parquet"
+    )
+
+    key = (
+        f"{trade_folder}/{filename}"
+    )
+
+    buffer = io.BytesIO()
+
+    xgboost_data.to_parquet(
+        buffer,
+        index=False,
+    )
+
+    buffer.seek(0)
+
+    s3.put_object(
+        Bucket=R2_BUCKET_NAME,
+        Key=key,
+        Body=buffer.getvalue(),
+        ContentType="application/octet-stream",
+    )
+
+
+def download_xgboost_data(
+    symbol,
+    trade_type,
+    stop_loss_percentage,
+    risk_reward_ratio,
+):
+    """
+    Download prepared XGBoost data.
+    """
+
+    key = (
+        f"{XGBOOST_DATA_PATH}/"
+        f"{symbol}/"
+        f"{trade_type}/"
+        f"sl_{float(stop_loss_percentage)}_"
+        f"rr_{float(risk_reward_ratio)}.parquet"
+    )
+
+    response = s3.get_object(
+        Bucket=R2_BUCKET_NAME,
+        Key=key,
+    )
+
+    data = response["Body"].read()
+
+    return pd.read_parquet(
+        io.BytesIO(data)
+    )
+
+
+# ============================================================
+# XGBOOST MODELS
+# ============================================================
+
+XGBOOST_MODEL_PATH = "xgboost_models"
+
+
+def save_xgboost_model(
+    symbol,
+    trade_type,
+    stop_loss_percentage,
+    risk_reward_ratio,
+    model_bytes,
+):
+    """
+    Save an XGBoost model.
+
+    The model is stored as JSON.
+    """
+
+    stock_folder = (
+        f"{XGBOOST_MODEL_PATH}/{symbol}"
+    )
+
+    trade_folder = (
+        f"{stock_folder}/{trade_type}"
+    )
+
+    strategy_folder = (
+        f"{trade_folder}/"
+        f"sl_{float(stop_loss_percentage)}_"
+        f"rr_{float(risk_reward_ratio)}"
+    )
+
+    ensure_r2_folder(
+        XGBOOST_MODEL_PATH
+    )
+
+    ensure_r2_folder(
+        stock_folder
+    )
+
+    ensure_r2_folder(
+        trade_folder
+    )
+
+    ensure_r2_folder(
+        strategy_folder
+    )
+
+    key = (
+        f"{strategy_folder}/model.json"
+    )
+
+    s3.put_object(
+        Bucket=R2_BUCKET_NAME,
+        Key=key,
+        Body=model_bytes,
+        ContentType="application/json",
+    )
+
+
+def download_xgboost_model(
+    symbol,
+    trade_type,
+    stop_loss_percentage,
+    risk_reward_ratio,
+):
+    """
+    Download a previously trained XGBoost model.
+    """
+
+    key = (
+        f"{XGBOOST_MODEL_PATH}/"
+        f"{symbol}/"
+        f"{trade_type}/"
+        f"sl_{float(stop_loss_percentage)}_"
+        f"rr_{float(risk_reward_ratio)}/"
+        f"model.json"
+    )
+
+    response = s3.get_object(
+        Bucket=R2_BUCKET_NAME,
+        Key=key,
+    )
+
+    return response["Body"].read()
+
+
+# ============================================================
+# XGBOOST FEATURE IMPORTANCE
+# ============================================================
+
+def save_xgboost_feature_importance(
+    symbol,
+    trade_type,
+    stop_loss_percentage,
+    risk_reward_ratio,
+    feature_importance,
+):
+    """
+    Save feature importance for every input feature.
+
+    This includes features with zero importance.
+    """
+
+    stock_folder = (
+        f"{XGBOOST_MODEL_PATH}/{symbol}"
+    )
+
+    trade_folder = (
+        f"{stock_folder}/{trade_type}"
+    )
+
+    strategy_folder = (
+        f"{trade_folder}/"
+        f"sl_{float(stop_loss_percentage)}_"
+        f"rr_{float(risk_reward_ratio)}"
+    )
+
+    ensure_r2_folder(
+        strategy_folder
+    )
+
+    key = (
+        f"{strategy_folder}/"
+        f"feature_importance.parquet"
+    )
+
+    buffer = io.BytesIO()
+
+    feature_importance.to_parquet(
+        buffer,
+        index=False,
+    )
+
+    buffer.seek(0)
+
+    s3.put_object(
+        Bucket=R2_BUCKET_NAME,
+        Key=key,
+        Body=buffer.getvalue(),
+        ContentType="application/octet-stream",
+    )
+
+
+# ============================================================
+# XGBOOST TRAINING METRICS
+# ============================================================
+
+def save_xgboost_training_metrics(
+    symbol,
+    trade_type,
+    stop_loss_percentage,
+    risk_reward_ratio,
+    training_metrics,
+):
+    """
+    Save model training / validation metrics.
+    """
+
+    stock_folder = (
+        f"{XGBOOST_MODEL_PATH}/{symbol}"
+    )
+
+    trade_folder = (
+        f"{stock_folder}/{trade_type}"
+    )
+
+    strategy_folder = (
+        f"{trade_folder}/"
+        f"sl_{float(stop_loss_percentage)}_"
+        f"rr_{float(risk_reward_ratio)}"
+    )
+
+    ensure_r2_folder(
+        strategy_folder
+    )
+
+    key = (
+        f"{strategy_folder}/"
+        f"training_metrics.parquet"
+    )
+
+    buffer = io.BytesIO()
+
+    training_metrics.to_parquet(
+        buffer,
+        index=False,
+    )
+
+    buffer.seek(0)
+
+    s3.put_object(
+        Bucket=R2_BUCKET_NAME,
+        Key=key,
+        Body=buffer.getvalue(),
+        ContentType="application/octet-stream",
+    )

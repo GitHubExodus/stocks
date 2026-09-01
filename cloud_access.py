@@ -1256,3 +1256,291 @@ def save_xgboost_training_metrics(
         Body=buffer.getvalue(),
         ContentType="application/octet-stream",
     )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ============================================================
+# XGBOOST MODEL
+# ============================================================
+
+XGBOOST_PATH = "xgboost"
+
+
+def download_xgboost_model(
+    symbol,
+    trade_type,
+    stop_loss_percentage,
+    risk_reward_ratio,
+):
+    """
+    Download a trained XGBoost model.
+
+    Expected R2 path:
+
+        xgboost/
+        DELL/
+        long/
+        sl_1.0_rr_2.0/
+        model.json
+    """
+
+    sl_string = _format_strategy_number(
+        stop_loss_percentage
+    )
+
+    rr_string = _format_strategy_number(
+        risk_reward_ratio
+    )
+
+    key = (
+        f"{XGBOOST_PATH}/"
+        f"{symbol}/"
+        f"{trade_type}/"
+        f"sl_{sl_string}_"
+        f"rr_{rr_string}/"
+        f"model.json"
+    )
+
+    print(
+        f"Downloading XGBoost model | key={key}"
+    )
+
+    response = s3.get_object(
+        Bucket=R2_BUCKET_NAME,
+        Key=key,
+    )
+
+    return response["Body"].read()
+
+
+# ============================================================
+# SAVE XGBOOST EQUITY CURVE
+# ============================================================
+
+XGBOOST_EVALUATION_PATH = (
+    "evaluate_xgboost"
+)
+
+
+def save_xgboost_equity_curve(
+    symbol,
+    trade_type,
+    stop_loss_percentage,
+    risk_reward_ratio,
+    equity_curve,
+):
+    """
+    Save the XGBoost evaluation equity curve.
+
+    Example:
+
+        evaluate_xgboost/
+        DELL/
+        long/
+        sl_1.0_rr_2.0/
+        equity_curve.parquet
+    """
+
+    sl_string = _format_strategy_number(
+        stop_loss_percentage
+    )
+
+    rr_string = _format_strategy_number(
+        risk_reward_ratio
+    )
+
+    stock_folder = (
+        f"{XGBOOST_EVALUATION_PATH}/"
+        f"{symbol}"
+    )
+
+    trade_folder = (
+        f"{stock_folder}/"
+        f"{trade_type}"
+    )
+
+    strategy_folder = (
+        f"{trade_folder}/"
+        f"sl_{sl_string}_"
+        f"rr_{rr_string}"
+    )
+
+    ensure_r2_folder(
+        XGBOOST_EVALUATION_PATH
+    )
+
+    ensure_r2_folder(
+        stock_folder
+    )
+
+    ensure_r2_folder(
+        trade_folder
+    )
+
+    ensure_r2_folder(
+        strategy_folder
+    )
+
+    key = (
+        f"{strategy_folder}/"
+        f"equity_curve.parquet"
+    )
+
+    buffer = io.BytesIO()
+
+    equity_curve.to_parquet(
+        buffer,
+        index=False,
+    )
+
+    buffer.seek(0)
+
+    s3.put_object(
+        Bucket=R2_BUCKET_NAME,
+        Key=key,
+        Body=buffer.getvalue(),
+        ContentType="application/octet-stream",
+    )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ============================================================
+# CROSS-STOCK EVALUATION EQUITY CURVE
+# ============================================================
+
+CROSS_STOCK_EVALUATION_PATH = (
+    "evaluate_cross_stock"
+)
+
+
+def save_cross_stock_evaluation_equity_curve(
+    evaluation_symbol,
+    strategy_symbol,
+    trade_type,
+    stop_loss_percentage,
+    risk_reward_ratio,
+    equity_curve,
+):
+    """
+    Save the equity curve produced when evaluating one
+    stock using another stock's grid.
+
+    evaluation_symbol:
+        The stock whose actual trades are being evaluated.
+
+    strategy_symbol:
+        The stock whose grid is being used.
+
+    Example:
+
+        evaluate_cross_stock/
+            AAPL/
+                DELL/
+                    long/
+                        sl_1.0_rr_2.0/
+                            equity_curve.parquet
+
+    This allows AAPL to be evaluated using:
+        AAPL's own grid
+        DELL's grid
+        MSFT's grid
+        etc.
+    """
+
+    sl_string = _format_strategy_number(
+        stop_loss_percentage
+    )
+
+    rr_string = _format_strategy_number(
+        risk_reward_ratio
+    )
+
+    evaluation_folder = (
+        f"{CROSS_STOCK_EVALUATION_PATH}/"
+        f"{evaluation_symbol}"
+    )
+
+    strategy_folder = (
+        f"{evaluation_folder}/"
+        f"{strategy_symbol}"
+    )
+
+    trade_folder = (
+        f"{strategy_folder}/"
+        f"{trade_type}"
+    )
+
+    final_folder = (
+        f"{trade_folder}/"
+        f"sl_{sl_string}_"
+        f"rr_{rr_string}"
+    )
+
+    ensure_r2_folder(
+        CROSS_STOCK_EVALUATION_PATH
+    )
+
+    ensure_r2_folder(
+        evaluation_folder
+    )
+
+    ensure_r2_folder(
+        strategy_folder
+    )
+
+    ensure_r2_folder(
+        trade_folder
+    )
+
+    ensure_r2_folder(
+        final_folder
+    )
+
+    key = (
+        f"{final_folder}/"
+        f"equity_curve.parquet"
+    )
+
+    buffer = io.BytesIO()
+
+    equity_curve.to_parquet(
+        buffer,
+        index=False,
+    )
+
+    buffer.seek(0)
+
+    s3.put_object(
+        Bucket=R2_BUCKET_NAME,
+        Key=key,
+        Body=buffer.getvalue(),
+        ContentType="application/octet-stream",
+    )

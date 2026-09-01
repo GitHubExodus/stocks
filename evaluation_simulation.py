@@ -146,6 +146,12 @@ def prepare_training_grid(
         .reset_index(drop=True)
     )
 
+    if len(grid_data) == 0:
+
+        raise ValueError(
+            "Cannot prepare an empty training grid."
+        )
+
     input_names = (
         grid_configuration[
             "input_name"
@@ -180,13 +186,27 @@ def prepare_training_grid(
         )
     )
 
-    num_grid_cells = len(
-        grid_data
-    )
+    num_grid_cells = len(grid_data)
+    num_dimensions = len(bin_counts)
 
-    num_dimensions = len(
-        bin_counts
-    )
+    # Verify that every expected dimension exists.
+    required_columns = [
+        f"dim_{dimension}"
+        for dimension in range(num_dimensions)
+    ]
+
+    missing_columns = [
+        column
+        for column in required_columns
+        if column not in grid_data.columns
+    ]
+
+    if missing_columns:
+
+        raise ValueError(
+            "Grid data is missing coordinate columns: "
+            + ", ".join(missing_columns)
+        )
 
     grid_coordinates = np.empty(
         (
@@ -196,9 +216,7 @@ def prepare_training_grid(
         dtype=np.int64,
     )
 
-    for dimension in range(
-        num_dimensions
-    ):
+    for dimension in range(num_dimensions):
 
         grid_coordinates[
             :,
@@ -211,10 +229,6 @@ def prepare_training_grid(
                 dtype=np.int64
             )
         )
-
-    # --------------------------------------------------------
-    # Sort lexicographically
-    # --------------------------------------------------------
 
     sort_keys = tuple(
         grid_coordinates[
@@ -242,9 +256,7 @@ def prepare_training_grid(
         ]
         .to_numpy(
             dtype=np.float64
-        )[
-            sort_order
-        ]
+        )[sort_order]
     )
 
     total_wins = (
@@ -253,9 +265,7 @@ def prepare_training_grid(
         ]
         .to_numpy(
             dtype=np.float64
-        )[
-            sort_order
-        ]
+        )[sort_order]
     )
 
     return (
@@ -267,7 +277,6 @@ def prepare_training_grid(
         total_trades,
         total_wins,
     )
-
 
 # ============================================================
 # NUMBA EVALUATION
@@ -640,22 +649,46 @@ def evaluate_grid(
     trade_type,
 ):
     """
-    Evaluate AAPL's trades against one stock's grid.
+    Evaluate EVALUATION_SYMBOL's trades against one
+    stock's frozen training grid.
+
+    The evaluation stock provides:
+        - input values
+        - entry prices
+        - exit prices
+
+    The grid stock provides:
+        - grid configuration
+        - grid cell statistics
     """
+
+    # ========================================================
+    # EMPTY GRID
+    # ========================================================
+
+    if grid_data is None or len(grid_data) == 0:
+
+        return pd.DataFrame(
+            columns=[
+                "start_timestamp",
+                "end_timestamp",
+                "time_elapsed_minutes",
+                "entry_price",
+                "exit_price",
+                "dollar_return",
+                "equity",
+            ]
+        )
 
     # ========================================================
     # INPUT DATA
     # ========================================================
 
-    input_data = (
-        input_data.copy()
-    )
+    input_data = input_data.copy()
 
     input_data["timestamp"] = (
         pd.to_datetime(
-            input_data[
-                "timestamp"
-            ],
+            input_data["timestamp"],
             utc=True,
         )
         .dt.tz_convert(
@@ -666,34 +699,22 @@ def evaluate_grid(
     input_data = (
         input_data
         .drop_duplicates(
-            subset=[
-                "timestamp"
-            ],
+            subset=["timestamp"],
             keep="first",
         )
-        .sort_values(
-            "timestamp"
-        )
-        .reset_index(
-            drop=True
-        )
+        .sort_values("timestamp")
+        .reset_index(drop=True)
     )
 
     # ========================================================
-    # RR DATA
+    # RISK / REWARD DATA
     # ========================================================
 
-    risk_reward_data = (
-        risk_reward_data.copy()
-    )
+    risk_reward_data = risk_reward_data.copy()
 
-    risk_reward_data[
-        "start_timestamp"
-    ] = (
+    risk_reward_data["start_timestamp"] = (
         pd.to_datetime(
-            risk_reward_data[
-                "start_timestamp"
-            ],
+            risk_reward_data["start_timestamp"],
             utc=True,
         )
         .dt.tz_convert(
@@ -701,14 +722,22 @@ def evaluate_grid(
         )
     )
 
+    if "end_timestamp" in risk_reward_data.columns:
+
+        risk_reward_data["end_timestamp"] = (
+            pd.to_datetime(
+                risk_reward_data["end_timestamp"],
+                utc=True,
+            )
+            .dt.tz_convert(
+                "America/New_York"
+            )
+        )
+
     risk_reward_data = (
         risk_reward_data
-        .sort_values(
-            "start_timestamp"
-        )
-        .reset_index(
-            drop=True
-        )
+        .sort_values("start_timestamp")
+        .reset_index(drop=True)
     )
 
     # ========================================================
@@ -743,11 +772,26 @@ def evaluate_grid(
         grid_total_trades,
         grid_total_wins,
     ) = prepare_training_grid(
-        grid_configuration=(
-            grid_configuration
-        ),
+        grid_configuration=grid_configuration,
         grid_data=grid_data,
     )
+
+    # ========================================================
+    # VERIFY INPUT FEATURES EXIST
+    # ========================================================
+
+    missing_inputs = [
+        name
+        for name in input_names
+        if name not in input_data.columns
+    ]
+
+    if missing_inputs:
+
+        raise ValueError(
+            "Missing evaluation input columns: "
+            + ", ".join(missing_inputs)
+        )
 
     # ========================================================
     # INPUT MATRIX
@@ -763,9 +807,7 @@ def evaluate_grid(
     )
 
     input_valid = np.all(
-        np.isfinite(
-            input_values
-        ),
+        np.isfinite(input_values),
         axis=1,
     )
 
@@ -801,7 +843,7 @@ def evaluate_grid(
     )
 
     # ========================================================
-    # NUMBA
+    # NUMBA EVALUATION
     # ========================================================
 
     (
@@ -810,54 +852,30 @@ def evaluate_grid(
     ) = _evaluate_grid_trades(
         input_values=input_values,
         input_valid=input_valid,
-        input_row_indices=(
-            input_row_indices
-        ),
-        rr_entry_prices=(
-            rr_entry_prices
-        ),
-        rr_exit_prices=(
-            rr_exit_prices
-        ),
-        grid_bin_counts=(
-            bin_counts
-        ),
-        grid_bin_sizes=(
-            bin_sizes
-        ),
-        grid_mins=(
-            mins
-        ),
-        grid_coordinates=(
-            grid_coordinates
-        ),
-        grid_total_trades=(
-            grid_total_trades
-        ),
-        grid_total_wins=(
-            grid_total_wins
-        ),
-        win_rate_threshold=(
-            WIN_RATE_THRESHOLD
-        ),
+        input_row_indices=input_row_indices,
+        rr_entry_prices=rr_entry_prices,
+        rr_exit_prices=rr_exit_prices,
+        grid_bin_counts=bin_counts,
+        grid_bin_sizes=bin_sizes,
+        grid_mins=mins,
+        grid_coordinates=grid_coordinates,
+        grid_total_trades=grid_total_trades,
+        grid_total_wins=grid_total_wins,
+        win_rate_threshold=WIN_RATE_THRESHOLD,
         is_long=(
             trade_type == "long"
         ),
     )
 
     # ========================================================
-    # CREATE EQUITY CURVE
+    # SELECTED TRADES
     # ========================================================
 
-    selected_indices = (
-        np.flatnonzero(
-            selected_mask
-        )
+    selected_indices = np.flatnonzero(
+        selected_mask
     )
 
-    if len(
-        selected_indices
-    ) == 0:
+    if len(selected_indices) == 0:
 
         return pd.DataFrame(
             columns=[
@@ -871,10 +889,13 @@ def evaluate_grid(
             ]
         )
 
+    # ========================================================
+    # SELECT RR ROWS
+    # ========================================================
+
     selected_rr = (
-        risk_reward_data.iloc[
-            selected_indices
-        ]
+        risk_reward_data
+        .iloc[selected_indices]
         .reset_index(drop=True)
     )
 
@@ -890,6 +911,10 @@ def evaluate_grid(
         ]
     )
 
+    # ========================================================
+    # ACTUAL EVALUATION P&L
+    # ========================================================
+
     if trade_type == "long":
 
         dollar_returns = (
@@ -903,6 +928,10 @@ def evaluate_grid(
             selected_entry
             - selected_exit
         )
+
+    # ========================================================
+    # EQUITY CURVE
+    # ========================================================
 
     equity_curve = pd.DataFrame(
         {
@@ -938,7 +967,6 @@ def evaluate_grid(
     )
 
     return equity_curve
-
 
 # ============================================================
 # MAIN
@@ -1106,6 +1134,25 @@ def main():
                             f"grid_symbol={grid_symbol} | "
                             f"cells={len(grid_data):,}"
                         )
+
+
+                        # =========================================================
+                        # SKIP EMPTY GRID
+                        # =========================================================
+
+                        if grid_data is None or len(grid_data) == 0:
+
+                            log(
+                                f"GRID EVALUATION SKIPPED | "
+                                f"evaluation_symbol={EVALUATION_SYMBOL} | "
+                                f"grid_symbol={grid_symbol} | "
+                                f"trade_type={trade_type} | "
+                                f"SL={stop_loss_percentage} | "
+                                f"RR={risk_reward_ratio} | "
+                                f"reason=empty_grid"
+                            )
+
+                            continue
 
                         # =========================================
                         # EVALUATE AAPL AGAINST THIS GRID

@@ -325,73 +325,98 @@ def match_rr_to_input_rows(
 # BUILD ALIGNED DATASET
 # ============================================================
 
-def build_aligned_dataset(
-    input_data,
-    risk_reward_data,
-):
+def build_aligned_dataset(input_data, risk_reward_data):
     """
-    Combine the 1-minute input features with the
-    5-minute risk/reward outcomes.
+    Build the dataset used by the EMA crossover + XGBoost system.
 
-    The feature set is exactly:
+    XGBoost features:
+        Only columns 2 through 28 whose names end exactly in
+        "_3" or "_5".
 
-        input_data.columns[1:28]
+    EMA signal:
+        ema_distance_9
+        ema_distance_21
 
-    giving 27 features.
+    The EMA columns do NOT need to be XGBoost features.
     """
 
-    input_data = prepare_input_data(
-        input_data
-    )
+    # --------------------------------------------------------
+    # PREPARE DATA
+    # --------------------------------------------------------
 
-    risk_reward_data = prepare_risk_reward_data(
-        risk_reward_data
-    )
+    input_data = prepare_input_data(input_data)
+    risk_reward_data = prepare_risk_reward_data(risk_reward_data)
 
-    if len(input_data.columns) < FEATURE_END_COLUMN:
+    # --------------------------------------------------------
+    # FIND XGBOOST FEATURES
+    #
+    # Python columns[1:28] means:
+    #   column 2 through column 28
+    # --------------------------------------------------------
+
+    if len(input_data.columns) < 28:
         raise ValueError(
-            "Input data does not contain enough columns "
-            "to extract the first 27 features."
+            f"Input data only has {len(input_data.columns)} columns. "
+            "At least 28 columns are required."
         )
 
-    feature_names = list(
-        input_data.columns[
-            FEATURE_START_COLUMN:
-            FEATURE_END_COLUMN
-        ]
+    candidate_columns = list(input_data.columns[1:28])
+
+    feature_names = [
+        column
+        for column in candidate_columns
+        if column.endswith("_3") or column.endswith("_5")
+    ]
+
+    if not feature_names:
+        raise ValueError(
+            "No XGBoost features ending in '_3' or '_5' "
+            "were found between columns 2 and 28."
+        )
+
+    # --------------------------------------------------------
+    # EMA COLUMNS
+    #
+    # These are NOT XGBoost features.
+    # They are only used to generate the crossover signal.
+    # --------------------------------------------------------
+
+    if EMA_FAST_COLUMN not in input_data.columns:
+        raise ValueError(
+            f"{EMA_FAST_COLUMN} is missing from input data."
+        )
+
+    if EMA_SLOW_COLUMN not in input_data.columns:
+        raise ValueError(
+            f"{EMA_SLOW_COLUMN} is missing from input data."
+        )
+
+    # --------------------------------------------------------
+    # CALCULATE EMA CROSSOVER ON THE FULL 1-MINUTE DATA
+    #
+    # This must happen BEFORE matching the RR rows.
+    # Otherwise shift(1) would refer to the previous RR row
+    # instead of the previous 1-minute bar.
+    # --------------------------------------------------------
+
+    fast = pd.to_numeric(
+        input_data[EMA_FAST_COLUMN],
+        errors="coerce",
     )
 
-    if EMA_FAST_COLUMN not in feature_names:
-        raise ValueError(
-            f"'{EMA_FAST_COLUMN}' is not one of "
-            f"the first 27 feature columns."
-        )
-
-    if EMA_SLOW_COLUMN not in feature_names:
-        raise ValueError(
-            f"'{EMA_SLOW_COLUMN}' is not one of "
-            f"the first 27 feature columns."
-        )
-
-    print(
-        "\nSelected XGBoost features:"
+    slow = pd.to_numeric(
+        input_data[EMA_SLOW_COLUMN],
+        errors="coerce",
     )
 
-    for i, name in enumerate(
-        feature_names,
-        start=1,
-    ):
-        print(
-            f"{i:2d}. {name}"
-        )
-
-    print(
-        f"\nTotal features: "
-        f"{len(feature_names)}"
+    input_data["ema_crossover"] = (
+        (fast.shift(1) <= slow.shift(1))
+        & (fast > slow)
     )
 
     # --------------------------------------------------------
-    # MATCH RR TO INPUT
+    # MATCH EACH RR BAR TO THE LATEST INPUT BAR
+    # WITHIN THE PREVIOUS 5 MINUTES
     # --------------------------------------------------------
 
     matched_indices = match_rr_to_input_rows(
@@ -399,145 +424,138 @@ def build_aligned_dataset(
         risk_reward_data,
     )
 
-    valid_matches = (
-        matched_indices >= 0
-    )
+    valid_matches = matched_indices >= 0
 
-    matched_count = int(
-        np.sum(valid_matches)
-    )
-
-    print(
-        f"\nRR rows: "
-        f"{len(risk_reward_data):,}"
-    )
-
-    print(
-        f"Matched RR rows: "
-        f"{matched_count:,}"
-    )
-
-    print(
-        f"Unmatched RR rows: "
-        f"{len(risk_reward_data) - matched_count:,}"
-    )
-
-    # Keep only RR rows with a valid
-    # corresponding input bar.
-    rr = risk_reward_data.loc[
-        valid_matches
-    ].copy()
-
-    input_indices = (
-        matched_indices[
-            valid_matches
-        ]
-    )
-
-    input_rows = (
-        input_data
-        .iloc[input_indices]
-        .reset_index(drop=True)
-    )
-
-    rr = (
-        rr
-        .reset_index(drop=True)
-    )
+    if not np.any(valid_matches):
+        raise ValueError(
+            "No risk/reward rows could be matched to input data."
+        )
 
     # --------------------------------------------------------
-    # BUILD DATASET
+    # KEEP ONLY VALID MATCHES
+    # --------------------------------------------------------
+
+    rr = risk_reward_data.loc[
+        valid_matches
+    ].reset_index(drop=True)
+
+    input_indices = matched_indices[valid_matches]
+
+    input_rows = input_data.iloc[
+        input_indices
+    ].reset_index(drop=True)
+
+    # --------------------------------------------------------
+    # BUILD ALIGNED DATASET
     # --------------------------------------------------------
 
     dataset = pd.DataFrame()
 
-    dataset["timestamp"] = (
-        rr["start_timestamp"].to_numpy()
-    )
+    # Timestamp
+    dataset["timestamp"] = rr[
+        "start_timestamp"
+    ].to_numpy()
 
-    # Copy exactly the 27 requested features.
+    # --------------------------------------------------------
+    # XGBOOST FEATURES
+    #
+    # Only the selected _3 / _5 columns.
+    # --------------------------------------------------------
+
     for feature_name in feature_names:
-        dataset[feature_name] = (
-            input_rows[
-                feature_name
-            ].to_numpy()
-        )
-
-    dataset[RR_RETURN_COLUMN] = (
-        pd.to_numeric(
-            rr[RR_RETURN_COLUMN],
-            errors="coerce",
-        ).to_numpy()
-    )
+        dataset[feature_name] = input_rows[
+            feature_name
+        ].to_numpy()
 
     # --------------------------------------------------------
-    # EMA CROSSOVER
+    # ACTUAL TRADE RETURN
     # --------------------------------------------------------
 
-    fast = pd.to_numeric(
-        dataset[EMA_FAST_COLUMN],
+    dataset["trade_return_percent"] = pd.to_numeric(
+        rr["trade_return_percent"],
         errors="coerce",
-    )
+    ).to_numpy()
 
-    slow = pd.to_numeric(
-        dataset[EMA_SLOW_COLUMN],
-        errors="coerce",
-    )
+    # --------------------------------------------------------
+    # EMA CROSSOVER SIGNAL
+    # --------------------------------------------------------
 
-    dataset["ema_crossover"] = (
-        (fast.shift(1) <= slow.shift(1))
-        &
-        (fast > slow)
-    )
+    dataset["ema_crossover"] = input_rows[
+        "ema_crossover"
+    ].to_numpy()
 
     # --------------------------------------------------------
     # TARGET
+    #
+    # 1 = profitable trade
+    # 0 = non-profitable trade
     # --------------------------------------------------------
 
     dataset["target"] = (
-        dataset[RR_RETURN_COLUMN] > 0.0
+        dataset["trade_return_percent"] > 0.0
     ).astype(np.int8)
 
     # --------------------------------------------------------
-    # REMOVE INVALID ROWS
+    # CLEAN INVALID VALUES
     # --------------------------------------------------------
 
     numeric_columns = (
         feature_names
-        + [RR_RETURN_COLUMN]
+        + ["trade_return_percent"]
     )
 
-    numeric_values = (
-        dataset[numeric_columns]
-        .apply(
-            pd.to_numeric,
+    for column in numeric_columns:
+        dataset[column] = pd.to_numeric(
+            dataset[column],
             errors="coerce",
         )
-        .to_numpy(
-            dtype=np.float64
-        )
+
+    feature_values = dataset[
+        feature_names
+    ].to_numpy(dtype=np.float64)
+
+    return_values = dataset[
+        "trade_return_percent"
+    ].to_numpy(dtype=np.float64)
+
+    valid_numeric = (
+        np.all(np.isfinite(feature_values), axis=1)
+        & np.isfinite(return_values)
     )
 
-    finite_mask = np.all(
-        np.isfinite(
-            numeric_values
-        ),
-        axis=1,
-    )
+    dataset = dataset.loc[
+        valid_numeric
+    ].reset_index(drop=True)
 
-    dataset = (
-        dataset.loc[finite_mask]
-        .reset_index(drop=True)
-    )
+    # --------------------------------------------------------
+    # SORT BY TIMESTAMP
+    # --------------------------------------------------------
 
-    dataset = (
-        dataset
-        .sort_values("timestamp")
-        .reset_index(drop=True)
-    )
+    dataset = dataset.sort_values(
+        "timestamp"
+    ).reset_index(drop=True)
+
+    # --------------------------------------------------------
+    # PRINT FEATURE INFORMATION
+    # --------------------------------------------------------
+
+    print()
+    print("XGBoost features:")
+    print(f"  Candidate columns: {len(candidate_columns)}")
+    print(f"  Selected features: {len(feature_names)}")
+
+    for feature_name in feature_names:
+        print(f"    {feature_name}")
+
+    print()
+    print("EMA signal columns:")
+    print(f"  Fast EMA: {EMA_FAST_COLUMN}")
+    print(f"  Slow EMA: {EMA_SLOW_COLUMN}")
+
+    print()
+    print(f"Aligned rows: {len(dataset):,}")
 
     return dataset, feature_names
-
 
 # ============================================================
 # SPLIT TRAIN / VALIDATION

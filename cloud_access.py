@@ -1436,43 +1436,40 @@ def save_xgboost_equity_curve(
 # CROSS-STOCK EVALUATION EQUITY CURVE
 # ============================================================
 
-CROSS_STOCK_EVALUATION_PATH = (
-    "evaluate_cross_stock"
-)
+CROSS_STOCK_EVALUATION_PATH = "evaluate_cross_stock"
 
 
 def save_cross_stock_evaluation_equity_curve(
     evaluation_symbol,
-    strategy_symbol,
+    grid_symbol,
     trade_type,
     stop_loss_percentage,
     risk_reward_ratio,
     equity_curve,
 ):
     """
-    Save the equity curve produced when evaluating one
-    stock using another stock's grid.
+    Save an equity curve produced by evaluating one stock
+    using another stock's grid.
 
     evaluation_symbol:
-        The stock whose actual trades are being evaluated.
+        Stock whose actual trades are being evaluated.
 
-    strategy_symbol:
-        The stock whose grid is being used.
+    grid_symbol:
+        Stock whose grid is being tested.
 
     Example:
 
         evaluate_cross_stock/
             AAPL/
-                DELL/
+                NVDA/
                     long/
-                        sl_1.0_rr_2.0/
+                        sl_0.5_rr_1.0/
                             equity_curve.parquet
 
-    This allows AAPL to be evaluated using:
-        AAPL's own grid
-        DELL's grid
-        MSFT's grid
-        etc.
+    This means:
+
+        Actual trades = AAPL
+        Grid = NVDA
     """
 
     sl_string = _format_strategy_number(
@@ -1488,17 +1485,17 @@ def save_cross_stock_evaluation_equity_curve(
         f"{evaluation_symbol}"
     )
 
-    strategy_folder = (
+    grid_folder = (
         f"{evaluation_folder}/"
-        f"{strategy_symbol}"
+        f"{grid_symbol}"
     )
 
     trade_folder = (
-        f"{strategy_folder}/"
+        f"{grid_folder}/"
         f"{trade_type}"
     )
 
-    final_folder = (
+    strategy_folder = (
         f"{trade_folder}/"
         f"sl_{sl_string}_"
         f"rr_{rr_string}"
@@ -1513,7 +1510,7 @@ def save_cross_stock_evaluation_equity_curve(
     )
 
     ensure_r2_folder(
-        strategy_folder
+        grid_folder
     )
 
     ensure_r2_folder(
@@ -1521,11 +1518,11 @@ def save_cross_stock_evaluation_equity_curve(
     )
 
     ensure_r2_folder(
-        final_folder
+        strategy_folder
     )
 
     key = (
-        f"{final_folder}/"
+        f"{strategy_folder}/"
         f"equity_curve.parquet"
     )
 

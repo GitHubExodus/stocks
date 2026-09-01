@@ -1,15 +1,16 @@
-
+import io
 import numpy as np
 import pandas as pd
 
 from numba import njit
 
 from cloud_access import (
+    get_stock_symbols,
     download_input_data,
     download_risk_reward_data,
     download_grid_configuration,
     download_grid_data,
-    save_evaluation_equity_curve,
+    save_cross_stock_evaluation_equity_curve,
     log,
 )
 
@@ -18,7 +19,7 @@ from cloud_access import (
 # CONFIGURATION
 # ============================================================
 
-SYMBOL = "DELL"
+EVALUATION_SYMBOL = "AAPL"
 
 WIN_RATE_THRESHOLD = 0.70
 
@@ -53,52 +54,23 @@ def match_rr_to_input_rows(
     input_timestamps,
 ):
     """
-    Match every RR timestamp to the latest input timestamp
-    inside the corresponding 5-minute candle.
+    Match every RR entry timestamp to the latest input
+    timestamp inside the corresponding 5-minute candle.
 
-    IMPORTANT:
-
-        RR timestamp = candle CLOSE.
-
-    Therefore:
-
-        RR timestamp = 1:00
-
-        Search interval:
-
-            12:55 <= input timestamp <= 1:00
-
-        Preferred match:
-
-            1:00
-
-        If 1:00 does not exist:
-
-            latest available timestamp before 1:00
+    RR timestamp is the candle CLOSE.
 
     Example:
 
-        RR timestamp:
+        RR timestamp = 1:00
+
+        Search:
+            12:55 <= input <= 1:00
+
+        Preferred:
             1:00
 
-        Input:
-            12:55
-            12:57
-            12:59
-            1:00
-
-        Selected:
-            1:00
-
-    If 1:00 does not exist:
-
-        Input:
-            12:55
-            12:57
-            12:59
-
-        Selected:
-            12:59
+        Otherwise:
+            latest timestamp before 1:00
     """
 
     rr_timestamps = pd.DatetimeIndex(
@@ -115,32 +87,19 @@ def match_rr_to_input_rows(
         dtype=np.int64,
     )
 
-    input_ns = (
-        input_timestamps
-        .asi8
-    )
+    input_ns = input_timestamps.asi8
+    rr_ns = rr_timestamps.asi8
 
-    rr_ns = (
-        rr_timestamps
-        .asi8
-    )
+    five_minutes = pd.Timedelta(
+        minutes=5
+    ).value
 
-    for rr_index, rr_end in enumerate(
-        rr_ns
-    ):
+    for rr_index, rr_end in enumerate(rr_ns):
 
         rr_start = (
             rr_end
-            - pd.Timedelta(
-                minutes=5
-            ).value
+            - five_minutes
         )
-
-        # ----------------------------------------------------
-        # Include the RR timestamp itself.
-        #
-        # rr_start <= input <= rr_end
-        # ----------------------------------------------------
 
         right = np.searchsorted(
             input_ns,
@@ -156,19 +115,162 @@ def match_rr_to_input_rows(
 
         if right > left:
 
-            result[
-                rr_index
-            ] = right - 1
+            result[rr_index] = (
+                right - 1
+            )
 
     return result
 
 
 # ============================================================
-# NUMBA GRID EVALUATION
+# PREPARE GRID
 # ============================================================
 
+def prepare_training_grid(
+    grid_configuration,
+    grid_data,
+):
+    """
+    Prepare one stock's frozen training grid.
+    """
+
+    grid_configuration = (
+        grid_configuration
+        .copy()
+        .reset_index(drop=True)
+    )
+
+    grid_data = (
+        grid_data
+        .copy()
+        .reset_index(drop=True)
+    )
+
+    input_names = (
+        grid_configuration[
+            "input_name"
+        ]
+        .tolist()
+    )
+
+    bin_counts = (
+        grid_configuration[
+            "bin_count"
+        ]
+        .to_numpy(
+            dtype=np.int64
+        )
+    )
+
+    bin_sizes = (
+        grid_configuration[
+            "bin_size"
+        ]
+        .to_numpy(
+            dtype=np.float64
+        )
+    )
+
+    mins = (
+        grid_configuration[
+            "min"
+        ]
+        .to_numpy(
+            dtype=np.float64
+        )
+    )
+
+    num_grid_cells = len(
+        grid_data
+    )
+
+    num_dimensions = len(
+        bin_counts
+    )
+
+    grid_coordinates = np.empty(
+        (
+            num_grid_cells,
+            num_dimensions,
+        ),
+        dtype=np.int64,
+    )
+
+    for dimension in range(
+        num_dimensions
+    ):
+
+        grid_coordinates[
+            :,
+            dimension
+        ] = (
+            grid_data[
+                f"dim_{dimension}"
+            ]
+            .to_numpy(
+                dtype=np.int64
+            )
+        )
+
+    # --------------------------------------------------------
+    # Sort lexicographically
+    # --------------------------------------------------------
+
+    sort_keys = tuple(
+        grid_coordinates[
+            :,
+            dimension
+        ]
+        for dimension in reversed(
+            range(num_dimensions)
+        )
+    )
+
+    sort_order = np.lexsort(
+        sort_keys
+    )
+
+    grid_coordinates = (
+        grid_coordinates[
+            sort_order
+        ]
+    )
+
+    total_trades = (
+        grid_data[
+            "Total_Trades"
+        ]
+        .to_numpy(
+            dtype=np.float64
+        )[
+            sort_order
+        ]
+    )
+
+    total_wins = (
+        grid_data[
+            "Total_Wins"
+        ]
+        .to_numpy(
+            dtype=np.float64
+        )[
+            sort_order
+        ]
+    )
+
+    return (
+        input_names,
+        bin_counts,
+        bin_sizes,
+        mins,
+        grid_coordinates,
+        total_trades,
+        total_wins,
+    )
+
+
 # ============================================================
-# NUMBA GRID EVALUATION
+# NUMBA EVALUATION
 # ============================================================
 
 @njit
@@ -176,8 +278,8 @@ def _evaluate_grid_trades(
     input_values,
     input_valid,
     input_row_indices,
-    rr_returns,
-    rr_time_elapsed,
+    rr_entry_prices,
+    rr_exit_prices,
     grid_bin_counts,
     grid_bin_sizes,
     grid_mins,
@@ -185,17 +287,21 @@ def _evaluate_grid_trades(
     grid_total_trades,
     grid_total_wins,
     win_rate_threshold,
+    is_long,
 ):
     """
-    Evaluate RR trades against the FROZEN TRAINING GRID.
+    Evaluate AAPL trades using another stock's frozen grid.
 
-    ONLY the training grid is used.
+    The grid decides whether a trade is selected.
 
-    Grid lookup uses direct coordinate comparison.
+    The actual dollar P&L comes from the AAPL
+    entry_price and exit_price.
 
-    No flattened integer is created.
+    Equity is additive:
 
-    Therefore there is no integer overflow.
+        equity += dollar_return
+
+    It does NOT compound.
     """
 
     num_rr = len(
@@ -215,12 +321,12 @@ def _evaluate_grid_trades(
         dtype=np.bool_,
     )
 
-    equity = np.ones(
+    equity = np.zeros(
         num_rr,
         dtype=np.float64,
     )
 
-    current_equity = 1.0
+    current_equity = 0.0
 
     for rr_index in range(
         num_rr
@@ -236,7 +342,7 @@ def _evaluate_grid_trades(
             continue
 
         # ====================================================
-        # VALIDATE INPUT ROW
+        # VALIDATE INPUT
         # ====================================================
 
         if not input_valid[
@@ -245,7 +351,7 @@ def _evaluate_grid_trades(
             continue
 
         # ====================================================
-        # CALCULATE GRID COORDINATE
+        # BUILD GRID COORDINATE
         # ====================================================
 
         coordinates = np.empty(
@@ -315,8 +421,7 @@ def _evaluate_grid_trades(
                 elif coordinate >= bin_count:
 
                     coordinate = (
-                        bin_count
-                        - 1
+                        bin_count - 1
                     )
 
             coordinates[
@@ -327,9 +432,7 @@ def _evaluate_grid_trades(
             continue
 
         # ====================================================
-        # BINARY SEARCH
-        #
-        # Search the sorted TRAINING GRID coordinates.
+        # BINARY SEARCH GRID
         # ====================================================
 
         left = 0
@@ -344,14 +447,7 @@ def _evaluate_grid_trades(
                 ) // 2
             )
 
-            # ------------------------------------------------
-            # Lexicographic comparison:
-            #
-            # training coordinate < target coordinate
-            # ------------------------------------------------
-
             training_less = False
-            training_greater = False
 
             for dimension in range(
                 num_dimensions
@@ -360,7 +456,7 @@ def _evaluate_grid_trades(
                 training_value = (
                     grid_coordinates[
                         middle,
-                        dimension
+                        dimension,
                     ]
                 )
 
@@ -383,14 +479,11 @@ def _evaluate_grid_trades(
                     > target_value
                 ):
 
-                    training_greater = True
                     break
 
             if training_less:
 
-                left = (
-                    middle + 1
-                )
+                left = middle + 1
 
             else:
 
@@ -414,7 +507,7 @@ def _evaluate_grid_trades(
             if (
                 grid_coordinates[
                     cell_index,
-                    dimension
+                    dimension,
                 ]
                 != coordinates[
                     dimension
@@ -428,7 +521,7 @@ def _evaluate_grid_trades(
             continue
 
         # ====================================================
-        # TRAINING GRID STATISTICS
+        # GRID STATISTICS
         # ====================================================
 
         total_trades = (
@@ -452,7 +545,7 @@ def _evaluate_grid_trades(
         )
 
         # ====================================================
-        # TRAINING GRID FILTER
+        # WIN RATE FILTER
         # ====================================================
 
         if (
@@ -462,38 +555,63 @@ def _evaluate_grid_trades(
             continue
 
         # ====================================================
-        # RR DATA
+        # AAPL ENTRY / EXIT
         # ====================================================
 
-        trade_return = (
-            rr_returns[
+        entry_price = (
+            rr_entry_prices[
                 rr_index
             ]
         )
 
-        elapsed_time = (
-            rr_time_elapsed[
+        exit_price = (
+            rr_exit_prices[
                 rr_index
             ]
         )
 
         if not np.isfinite(
-            trade_return
+            entry_price
         ):
             continue
 
         if not np.isfinite(
-            elapsed_time
+            exit_price
+        ):
+            continue
+
+        if entry_price <= 0.0:
+            continue
+
+        # ====================================================
+        # ACTUAL DOLLAR P&L
+        # ====================================================
+
+        if is_long:
+
+            dollar_return = (
+                exit_price
+                - entry_price
+            )
+
+        else:
+
+            dollar_return = (
+                entry_price
+                - exit_price
+            )
+
+        if not np.isfinite(
+            dollar_return
         ):
             continue
 
         # ====================================================
-        # COMPOUND EQUITY
+        # ADDITIVE EQUITY
         # ====================================================
 
-        current_equity *= (
-            1.0
-            + trade_return / 100.0
+        current_equity += (
+            dollar_return
         )
 
         selected_mask[
@@ -509,210 +627,28 @@ def _evaluate_grid_trades(
         equity,
     )
 
-# ============================================================
-# PREPARE TRAINING GRID
-# ============================================================
-
-def prepare_training_grid(
-    grid_configuration,
-    grid_data,
-):
-    """
-    Prepare the FROZEN TRAINING GRID for fast Numba lookup.
-
-    ONLY the training grid is used.
-
-    No grid is created.
-    No grid is modified.
-
-    Grid coordinates are stored directly instead of being
-    flattened into a potentially overflowing integer.
-    """
-
-    grid_configuration = (
-        grid_configuration
-        .copy()
-        .reset_index(drop=True)
-    )
-
-    grid_data = (
-        grid_data
-        .copy()
-        .reset_index(drop=True)
-    )
-
-    # ========================================================
-    # GRID CONFIGURATION
-    # ========================================================
-
-    input_names = (
-        grid_configuration[
-            "input_name"
-        ]
-        .tolist()
-    )
-
-    bin_counts = (
-        grid_configuration[
-            "bin_count"
-        ]
-        .to_numpy(
-            dtype=np.int64
-        )
-    )
-
-    bin_sizes = (
-        grid_configuration[
-            "bin_size"
-        ]
-        .to_numpy(
-            dtype=np.float64
-        )
-    )
-
-    mins = (
-        grid_configuration[
-            "min"
-        ]
-        .to_numpy(
-            dtype=np.float64
-        )
-    )
-
-    # ========================================================
-    # GRID COORDINATES
-    # ========================================================
-
-    num_grid_cells = len(
-        grid_data
-    )
-
-    num_dimensions = len(
-        bin_counts
-    )
-
-    grid_coordinates = np.empty(
-        (
-            num_grid_cells,
-            num_dimensions,
-        ),
-        dtype=np.int64,
-    )
-
-    for dimension in range(
-        num_dimensions
-    ):
-
-        grid_coordinates[
-            :,
-            dimension
-        ] = (
-            grid_data[
-                f"dim_{dimension}"
-            ]
-            .to_numpy(
-                dtype=np.int64
-            )
-        )
-
-    # ========================================================
-    # SORT GRID COORDINATES
-    #
-    # np.lexsort sorts by the last key first.
-    #
-    # This gives us:
-    #
-    # dim_0
-    # dim_1
-    # dim_2
-    # ...
-    #
-    # lexicographic ordering.
-    # ========================================================
-
-    sort_keys = tuple(
-        grid_coordinates[
-            :,
-            dimension
-        ]
-        for dimension in reversed(
-            range(num_dimensions)
-        )
-    )
-
-    sort_order = np.lexsort(
-        sort_keys
-    )
-
-    grid_coordinates = (
-        grid_coordinates[
-            sort_order
-        ]
-    )
-
-    # ========================================================
-    # TRAINING GRID STATISTICS
-    # ========================================================
-
-    total_trades = (
-        grid_data[
-            "Total_Trades"
-        ]
-        .to_numpy(
-            dtype=np.float64
-        )[
-            sort_order
-        ]
-    )
-
-    total_wins = (
-        grid_data[
-            "Total_Wins"
-        ]
-        .to_numpy(
-            dtype=np.float64
-        )[
-            sort_order
-        ]
-    )
-
-    return (
-        input_names,
-        bin_counts,
-        bin_sizes,
-        mins,
-        grid_coordinates,
-        total_trades,
-        total_wins,
-    )
 
 # ============================================================
-# EVALUATE ONE STRATEGY
+# EVALUATE ONE GRID AGAINST AAPL
 # ============================================================
 
-def evaluate_strategy(
+def evaluate_grid(
     input_data,
     risk_reward_data,
     grid_configuration,
     grid_data,
+    trade_type,
 ):
     """
-    Evaluate one:
-
-        trade_type
-        stop loss
-        RR
-
-    combination against the FROZEN TRAINING GRID.
+    Evaluate AAPL's trades against one stock's grid.
     """
 
     # ========================================================
-    # PREPARE INPUT DATA
+    # INPUT DATA
     # ========================================================
 
     input_data = (
-        input_data
-        .copy()
+        input_data.copy()
     )
 
     input_data["timestamp"] = (
@@ -744,12 +680,11 @@ def evaluate_strategy(
     )
 
     # ========================================================
-    # PREPARE RR DATA
+    # RR DATA
     # ========================================================
 
     risk_reward_data = (
-        risk_reward_data
-        .copy()
+        risk_reward_data.copy()
     )
 
     risk_reward_data[
@@ -777,7 +712,7 @@ def evaluate_strategy(
     )
 
     # ========================================================
-    # MATCH RR CANDLES TO INPUT ROWS
+    # MATCH RR TO INPUT
     # ========================================================
 
     input_row_indices = (
@@ -796,7 +731,7 @@ def evaluate_strategy(
     )
 
     # ========================================================
-    # PREPARE TRAINING GRID
+    # PREPARE GRID
     # ========================================================
 
     (
@@ -808,12 +743,14 @@ def evaluate_strategy(
         grid_total_trades,
         grid_total_wins,
     ) = prepare_training_grid(
-        grid_configuration=grid_configuration,
+        grid_configuration=(
+            grid_configuration
+        ),
         grid_data=grid_data,
     )
 
     # ========================================================
-    # BUILD INPUT NUMPY MATRIX
+    # INPUT MATRIX
     # ========================================================
 
     input_values = (
@@ -833,12 +770,21 @@ def evaluate_strategy(
     )
 
     # ========================================================
-    # RR NUMPY ARRAYS
+    # RR PRICES
     # ========================================================
 
-    rr_returns = (
+    rr_entry_prices = (
         risk_reward_data[
-            "trade_return_percent"
+            "entry_price"
+        ]
+        .to_numpy(
+            dtype=np.float64
+        )
+    )
+
+    rr_exit_prices = (
+        risk_reward_data[
+            "exit_price"
         ]
         .to_numpy(
             dtype=np.float64
@@ -855,7 +801,7 @@ def evaluate_strategy(
     )
 
     # ========================================================
-    # NUMBA EVALUATION
+    # NUMBA
     # ========================================================
 
     (
@@ -864,24 +810,49 @@ def evaluate_strategy(
     ) = _evaluate_grid_trades(
         input_values=input_values,
         input_valid=input_valid,
-        input_row_indices=input_row_indices,
-        rr_returns=rr_returns,
-        rr_time_elapsed=rr_time_elapsed,
-        grid_bin_counts=bin_counts,
-        grid_bin_sizes=bin_sizes,
-        grid_mins=mins,
-        grid_coordinates=grid_coordinates,
-        grid_total_trades=grid_total_trades,
-        grid_total_wins=grid_total_wins,
-        win_rate_threshold=WIN_RATE_THRESHOLD,
+        input_row_indices=(
+            input_row_indices
+        ),
+        rr_entry_prices=(
+            rr_entry_prices
+        ),
+        rr_exit_prices=(
+            rr_exit_prices
+        ),
+        grid_bin_counts=(
+            bin_counts
+        ),
+        grid_bin_sizes=(
+            bin_sizes
+        ),
+        grid_mins=(
+            mins
+        ),
+        grid_coordinates=(
+            grid_coordinates
+        ),
+        grid_total_trades=(
+            grid_total_trades
+        ),
+        grid_total_wins=(
+            grid_total_wins
+        ),
+        win_rate_threshold=(
+            WIN_RATE_THRESHOLD
+        ),
+        is_long=(
+            trade_type == "long"
+        ),
     )
 
     # ========================================================
     # CREATE EQUITY CURVE
     # ========================================================
 
-    selected_indices = np.flatnonzero(
-        selected_mask
+    selected_indices = (
+        np.flatnonzero(
+            selected_mask
+        )
     )
 
     if len(
@@ -891,19 +862,58 @@ def evaluate_strategy(
         return pd.DataFrame(
             columns=[
                 "start_timestamp",
+                "end_timestamp",
                 "time_elapsed_minutes",
-                "trade_return_percent",
+                "entry_price",
+                "exit_price",
+                "dollar_return",
                 "equity",
             ]
+        )
+
+    selected_rr = (
+        risk_reward_data.iloc[
+            selected_indices
+        ]
+        .reset_index(drop=True)
+    )
+
+    selected_entry = (
+        rr_entry_prices[
+            selected_indices
+        ]
+    )
+
+    selected_exit = (
+        rr_exit_prices[
+            selected_indices
+        ]
+    )
+
+    if trade_type == "long":
+
+        dollar_returns = (
+            selected_exit
+            - selected_entry
+        )
+
+    else:
+
+        dollar_returns = (
+            selected_entry
+            - selected_exit
         )
 
     equity_curve = pd.DataFrame(
         {
             "start_timestamp":
-                risk_reward_data[
+                selected_rr[
                     "start_timestamp"
-                ].iloc[
-                    selected_indices
+                ].to_numpy(),
+
+            "end_timestamp":
+                selected_rr[
+                    "end_timestamp"
                 ].to_numpy(),
 
             "time_elapsed_minutes":
@@ -911,10 +921,14 @@ def evaluate_strategy(
                     selected_indices
                 ],
 
-            "trade_return_percent":
-                rr_returns[
-                    selected_indices
-                ],
+            "entry_price":
+                selected_entry,
+
+            "exit_price":
+                selected_exit,
+
+            "dollar_return":
+                dollar_returns,
 
             "equity":
                 equity[
@@ -934,27 +948,44 @@ def main():
 
     log(
         f"EVALUATION STARTED | "
-        f"SYMBOL={SYMBOL}"
+        f"EVALUATION_SYMBOL={EVALUATION_SYMBOL}"
     )
 
     # ========================================================
-    # DOWNLOAD INPUT DATA ONCE
+    # GET ALL STOCKS
+    # ========================================================
+
+    symbols = get_stock_symbols()
+
+    symbols = [
+        str(symbol).strip().upper()
+        for symbol in symbols
+        if str(symbol).strip()
+    ]
+
+    log(
+        f"Evaluation grid stocks loaded | "
+        f"count={len(symbols):,}"
+    )
+
+    # ========================================================
+    # DOWNLOAD AAPL INPUT DATA ONCE
     # ========================================================
 
     log(
-        f"Downloading input data | "
-        f"symbol={SYMBOL}"
+        f"Downloading evaluation input data | "
+        f"symbol={EVALUATION_SYMBOL}"
     )
 
     input_data = (
         download_input_data(
-            SYMBOL
+            EVALUATION_SYMBOL
         )
     )
 
     log(
-        f"Input data downloaded | "
-        f"symbol={SYMBOL} | "
+        f"Evaluation input data downloaded | "
+        f"symbol={EVALUATION_SYMBOL} | "
         f"rows={len(input_data):,}"
     )
 
@@ -973,132 +1004,198 @@ def main():
             ):
 
                 log(
-                    f"EVALUATION STRATEGY START | "
-                    f"symbol={SYMBOL} | "
+                    f"STRATEGY START | "
+                    f"evaluation_symbol={EVALUATION_SYMBOL} | "
                     f"trade_type={trade_type} | "
                     f"SL={stop_loss_percentage} | "
                     f"RR={risk_reward_ratio}"
                 )
 
                 # =================================================
-                # DOWNLOAD RR DATA
+                # DOWNLOAD AAPL RR DATA
+                #
+                # These are the trades being evaluated.
                 # =================================================
 
                 risk_reward_data = (
                     download_risk_reward_data(
-                        symbol=SYMBOL,
-                        trade_type=trade_type,
+                        symbol=(
+                            EVALUATION_SYMBOL
+                        ),
+                        trade_type=(
+                            trade_type
+                        ),
                         stop_loss_percentage=(
                             stop_loss_percentage
                         ),
                         risk_reward_ratio=(
                             risk_reward_ratio
                         ),
-                    )
-                )
-
-                # =================================================
-                # DOWNLOAD TRAINING GRID CONFIGURATION
-                #
-                # ONLY TRAINING IS USED.
-                # =================================================
-
-                grid_configuration = (
-                    download_grid_configuration(
-                        symbol=SYMBOL,
-                        trade_type=trade_type,
-                        stop_loss_percentage=(
-                            stop_loss_percentage
-                        ),
-                        risk_reward_ratio=(
-                            risk_reward_ratio
-                        ),
-                        dataset="training",
-                    )
-                )
-
-                # =================================================
-                # DOWNLOAD TRAINING GRID CELLS
-                #
-                # ONLY TRAINING IS USED.
-                # =================================================
-
-                grid_data = (
-                    download_grid_data(
-                        symbol=SYMBOL,
-                        trade_type=trade_type,
-                        stop_loss_percentage=(
-                            stop_loss_percentage
-                        ),
-                        risk_reward_ratio=(
-                            risk_reward_ratio
-                        ),
-                        dataset="training",
                     )
                 )
 
                 log(
-                    f"Training grid downloaded | "
-                    f"symbol={SYMBOL} | "
-                    f"trade_type={trade_type} | "
-                    f"SL={stop_loss_percentage} | "
-                    f"RR={risk_reward_ratio} | "
-                    f"cells={len(grid_data):,}"
+                    f"AAPL RR data downloaded | "
+                    f"rows={len(risk_reward_data):,}"
                 )
 
                 # =================================================
-                # EVALUATE
+                # EVERY STOCK'S GRID
                 # =================================================
 
-                equity_curve = (
-                    evaluate_strategy(
-                        input_data=(
-                            input_data
-                        ),
-                        risk_reward_data=(
-                            risk_reward_data
-                        ),
-                        grid_configuration=(
-                            grid_configuration
-                        ),
-                        grid_data=(
-                            grid_data
-                        ),
+                for grid_symbol in symbols:
+
+                    log(
+                        f"GRID EVALUATION START | "
+                        f"evaluation_symbol="
+                        f"{EVALUATION_SYMBOL} | "
+                        f"grid_symbol={grid_symbol} | "
+                        f"trade_type={trade_type} | "
+                        f"SL={stop_loss_percentage} | "
+                        f"RR={risk_reward_ratio}"
                     )
-                )
 
-                # =================================================
-                # SAVE
-                # =================================================
+                    try:
 
-                save_evaluation_equity_curve(
-                    symbol=SYMBOL,
-                    trade_type=trade_type,
-                    stop_loss_percentage=(
-                        stop_loss_percentage
-                    ),
-                    risk_reward_ratio=(
-                        risk_reward_ratio
-                    ),
-                    equity_curve=(
-                        equity_curve
-                    ),
-                )
+                        # =========================================
+                        # DOWNLOAD GRID CONFIGURATION
+                        # =========================================
+
+                        grid_configuration = (
+                            download_grid_configuration(
+                                symbol=(
+                                    grid_symbol
+                                ),
+                                trade_type=(
+                                    trade_type
+                                ),
+                                stop_loss_percentage=(
+                                    stop_loss_percentage
+                                ),
+                                risk_reward_ratio=(
+                                    risk_reward_ratio
+                                ),
+                                dataset="training",
+                            )
+                        )
+
+                        # =========================================
+                        # DOWNLOAD GRID CELLS
+                        # =========================================
+
+                        grid_data = (
+                            download_grid_data(
+                                symbol=(
+                                    grid_symbol
+                                ),
+                                trade_type=(
+                                    trade_type
+                                ),
+                                stop_loss_percentage=(
+                                    stop_loss_percentage
+                                ),
+                                risk_reward_ratio=(
+                                    risk_reward_ratio
+                                ),
+                                dataset="training",
+                            )
+                        )
+
+                        log(
+                            f"Grid downloaded | "
+                            f"grid_symbol={grid_symbol} | "
+                            f"cells={len(grid_data):,}"
+                        )
+
+                        # =========================================
+                        # EVALUATE AAPL AGAINST THIS GRID
+                        # =========================================
+
+                        equity_curve = (
+                            evaluate_grid(
+                                input_data=(
+                                    input_data
+                                ),
+                                risk_reward_data=(
+                                    risk_reward_data
+                                ),
+                                grid_configuration=(
+                                    grid_configuration
+                                ),
+                                grid_data=(
+                                    grid_data
+                                ),
+                                trade_type=(
+                                    trade_type
+                                ),
+                            )
+                        )
+
+                        # =========================================
+                        # SAVE
+                        # =========================================
+
+                        save_cross_stock_evaluation_equity_curve(
+                            evaluation_symbol=(
+                                EVALUATION_SYMBOL
+                            ),
+                            grid_symbol=(
+                                grid_symbol
+                            ),
+                            trade_type=(
+                                trade_type
+                            ),
+                            stop_loss_percentage=(
+                                stop_loss_percentage
+                            ),
+                            risk_reward_ratio=(
+                                risk_reward_ratio
+                            ),
+                            equity_curve=(
+                                equity_curve
+                            ),
+                        )
+
+                        log(
+                            f"GRID EVALUATION COMPLETE | "
+                            f"evaluation_symbol="
+                            f"{EVALUATION_SYMBOL} | "
+                            f"grid_symbol={grid_symbol} | "
+                            f"trades={len(equity_curve):,}"
+                        )
+
+                    except Exception as error:
+
+                        log(
+                            f"GRID EVALUATION FAILED | "
+                            f"evaluation_symbol="
+                            f"{EVALUATION_SYMBOL} | "
+                            f"grid_symbol={grid_symbol} | "
+                            f"trade_type={trade_type} | "
+                            f"SL={stop_loss_percentage} | "
+                            f"RR={risk_reward_ratio} | "
+                            f"error={error}"
+                        )
+
+                        raise
 
                 log(
-                    f"EVALUATION STRATEGY COMPLETE | "
-                    f"symbol={SYMBOL} | "
+                    f"STRATEGY COMPLETE | "
+                    f"evaluation_symbol={EVALUATION_SYMBOL} | "
                     f"trade_type={trade_type} | "
                     f"SL={stop_loss_percentage} | "
-                    f"RR={risk_reward_ratio} | "
-                    f"trades={len(equity_curve):,}"
+                    f"RR={risk_reward_ratio}"
                 )
 
     log(
         f"EVALUATION COMPLETE | "
-        f"SYMBOL={SYMBOL}"
+        f"EVALUATION_SYMBOL={EVALUATION_SYMBOL}"
     )
 
+
+# ============================================================
+# START
+# ============================================================
 
 if __name__ == "__main__":
     main()

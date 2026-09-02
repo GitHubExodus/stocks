@@ -47,14 +47,17 @@ VALIDATION_START_DATE = "2025-01-01"
 # ============================================================
 # FEATURE CONFIGURATION
 # ============================================================
+#
+# These are the ONLY XGBoost features.
+#
+# XGBoost sees these values on EVERY aligned bar.
+#
+# The EMA crossover is NOT used to filter training data.
+# ============================================================
 
-FEATURE_START_COLUMN = 1
+EMA_FAST_COLUMN = "ema_distance_21"
 
-FEATURE_END_COLUMN = 28
-
-EMA_FAST_COLUMN = "ema_distance_9"
-
-EMA_SLOW_COLUMN = "ema_distance_21"
+EMA_SLOW_COLUMN = "ema_distance_50"
 
 RR_RETURN_COLUMN = "trade_return_percent"
 
@@ -63,9 +66,9 @@ RR_RETURN_COLUMN = "trade_return_percent"
 # XGBOOST CONFIGURATION
 # ============================================================
 
-MAX_ESTIMATORS = 20
+MAX_ESTIMATORS = 2000
 
-MAX_DEPTH = 3
+MAX_DEPTH = 6
 
 LEARNING_RATE = 0.05
 
@@ -81,7 +84,7 @@ XGBOOST_DEVICE = "cuda"
 
 
 # ============================================================
-# NEW OUTPUT LOCATION
+# OUTPUT LOCATION
 # ============================================================
 
 OUTPUT_ROOT = f"ema_xgboost/{SYMBOL}"
@@ -183,53 +186,6 @@ def upload_parquet(
 
 
 # ============================================================
-# DOWNLOAD MODEL
-# ============================================================
-
-def download_model(
-    client,
-):
-
-    response = client.get_object(
-        Bucket=R2_BUCKET_NAME,
-        Key=MODEL_PATH,
-    )
-
-    model_bytes = response["Body"].read()
-
-    model = XGBClassifier()
-
-    with tempfile.NamedTemporaryFile(
-        suffix=".json",
-        delete=False,
-    ) as temp_file:
-
-        temp_path = temp_file.name
-
-        temp_file.write(
-            model_bytes
-        )
-
-    try:
-
-        model.load_model(
-            temp_path
-        )
-
-    finally:
-
-        if os.path.exists(
-            temp_path
-        ):
-
-            os.remove(
-                temp_path
-            )
-
-    return model
-
-
-# ============================================================
 # SOURCE PATHS
 # ============================================================
 
@@ -296,7 +252,7 @@ def prepare_input_data(
 
 
 # ============================================================
-# PREPARE RR DATA
+# PREPARE RISK/REWARD DATA
 # ============================================================
 
 def prepare_risk_reward_data(
@@ -345,6 +301,16 @@ def prepare_risk_reward_data(
 # ============================================================
 # MATCH RR TO INPUT
 # ============================================================
+#
+# For every RR bar:
+#
+#     RR timestamp - 5 minutes < input timestamp
+#     input timestamp <= RR timestamp
+#
+# The latest valid input bar is selected.
+#
+# This allows the RR timestamp itself to match.
+# ============================================================
 
 def match_rr_to_input_rows(
     input_data,
@@ -387,16 +353,12 @@ def match_rr_to_input_rows(
             five_minutes
         )
 
-        # Latest input timestamp <= RR timestamp.
         right = np.searchsorted(
             input_ns,
             rr_end,
             side="right",
         )
 
-        # First input timestamp > RR timestamp - 5 minutes.
-        #
-        # Therefore the left edge is EXCLUSIVE.
         left = np.searchsorted(
             input_ns,
             rr_start,
@@ -415,28 +377,21 @@ def match_rr_to_input_rows(
 # ============================================================
 # BUILD ALIGNED DATASET
 # ============================================================
+#
+# IMPORTANT:
+#
+# Every successfully matched RR bar remains in the dataset.
+#
+# XGBoost training therefore uses ALL aligned bars.
+#
+# EMA crossover is calculated separately and retained as a
+# trading signal.
+# ============================================================
 
 def build_aligned_dataset(
     input_data,
     risk_reward_data,
 ):
-    """
-    Build the aligned EMA crossover + XGBoost dataset.
-
-    XGBoost features:
-        Columns 2 through 28, but only columns whose names
-        end exactly with "_3" or "_5".
-
-    EMA signal:
-        ema_distance_9
-        ema_distance_21
-
-    The EMA columns are NOT required to be XGBoost features.
-    """
-
-    # ========================================================
-    # PREPARE DATA
-    # ========================================================
 
     input_data = prepare_input_data(
         input_data
@@ -448,68 +403,48 @@ def build_aligned_dataset(
         )
     )
 
-    # ========================================================
-    # XGBOOST FEATURE SELECTION
-    #
-    # columns[1:28] = columns 2 through 28
-    #
-    # Only keep indicators ending in _3 or _5.
-    # ========================================================
-
-    if len(input_data.columns) < 28:
-
-        raise ValueError(
-            f"Input data only has "
-            f"{len(input_data.columns)} columns. "
-            f"At least 28 columns are required."
-        )
-
-    candidate_columns = list(
-        input_data.columns[1:28]
-    )
-
-    feature_names = [
-        column
-        for column in candidate_columns
-        if column.endswith("_3")
-        or column.endswith("_5")
-    ]
-
-    if not feature_names:
-
-        raise ValueError(
-            "No XGBoost features ending in "
-            "'_3' or '_5' were found between "
-            "columns 2 and 28."
-        )
-
-    # ========================================================
-    # EMA COLUMNS
-    #
-    # These only generate the crossover signal.
-    # They do NOT need to be XGBoost features.
-    # ========================================================
+    # --------------------------------------------------------
+    # VERIFY EMA COLUMNS
+    # --------------------------------------------------------
 
     if EMA_FAST_COLUMN not in input_data.columns:
 
         raise ValueError(
             f"{EMA_FAST_COLUMN} is missing "
-            f"from the input data."
+            "from the input data."
         )
 
     if EMA_SLOW_COLUMN not in input_data.columns:
 
         raise ValueError(
             f"{EMA_SLOW_COLUMN} is missing "
-            f"from the input data."
+            "from the input data."
         )
 
-    # ========================================================
-    # CALCULATE EMA CROSSOVER ON FULL 1-MINUTE DATA
+    # --------------------------------------------------------
+    # XGBOOST FEATURES
+    # --------------------------------------------------------
+
+    feature_names = [
+        EMA_FAST_COLUMN,
+        EMA_SLOW_COLUMN,
+    ]
+
+    # --------------------------------------------------------
+    # CALCULATE EMA CROSSOVER
+    # --------------------------------------------------------
     #
-    # IMPORTANT:
-    # This happens BEFORE RR matching.
-    # ========================================================
+    # This is calculated on the COMPLETE 1-minute
+    # input dataset BEFORE RR alignment.
+    #
+    # Therefore shift(1) means the previous 1-minute
+    # bar.
+    #
+    # Upward crossover:
+    #
+    # previous fast <= previous slow
+    # current fast  >  current slow
+    # --------------------------------------------------------
 
     fast = pd.to_numeric(
         input_data[
@@ -531,9 +466,9 @@ def build_aligned_dataset(
         (fast > slow)
     )
 
-    # ========================================================
-    # MATCH RR ROWS TO INPUT ROWS
-    # ========================================================
+    # --------------------------------------------------------
+    # MATCH RR BARS
+    # --------------------------------------------------------
 
     matched_indices = (
         match_rr_to_input_rows(
@@ -553,9 +488,9 @@ def build_aligned_dataset(
             "matched to input data."
         )
 
-    # ========================================================
-    # KEEP VALID RR ROWS
-    # ========================================================
+    # --------------------------------------------------------
+    # KEEP ALL SUCCESSFULLY MATCHED RR BARS
+    # --------------------------------------------------------
 
     rr = (
         risk_reward_data
@@ -575,56 +510,51 @@ def build_aligned_dataset(
         .reset_index(drop=True)
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # BUILD DATASET
-    # ========================================================
+    # --------------------------------------------------------
 
     dataset = pd.DataFrame()
-
-    # --------------------------------------------------------
-    # Timestamp
-    # --------------------------------------------------------
 
     dataset["timestamp"] = (
         rr[
             "start_timestamp"
-        ]
-        .to_numpy()
+        ].to_numpy()
     )
 
     # --------------------------------------------------------
     # XGBOOST FEATURES
+    #
+    # EVERY BAR receives both features.
     # --------------------------------------------------------
 
     for feature_name in feature_names:
 
-        dataset[
-            feature_name
-        ] = (
+        dataset[feature_name] = (
             input_rows[
                 feature_name
-            ]
-            .to_numpy()
+            ].to_numpy()
         )
 
     # --------------------------------------------------------
-    # ACTUAL TRADE RETURN
+    # ACTUAL RR RETURN
     # --------------------------------------------------------
 
     dataset[
         RR_RETURN_COLUMN
-    ] = (
-        pd.to_numeric(
-            rr[
-                RR_RETURN_COLUMN
-            ],
-            errors="coerce",
-        )
-        .to_numpy()
-    )
+    ] = pd.to_numeric(
+        rr[
+            RR_RETURN_COLUMN
+        ],
+        errors="coerce",
+    ).to_numpy()
 
     # --------------------------------------------------------
-    # EMA CROSSOVER
+    # EMA SIGNAL
+    #
+    # Retained for trading.
+    #
+    # Does NOT remove rows from the dataset.
     # --------------------------------------------------------
 
     dataset[
@@ -632,38 +562,34 @@ def build_aligned_dataset(
     ] = (
         input_rows[
             "ema_crossover"
-        ]
-        .to_numpy()
+        ].to_numpy()
     )
 
-    # ========================================================
-    # TARGET
+    # --------------------------------------------------------
+    # XGBOOST TARGET
     #
-    # 1 = profitable
-    # 0 = not profitable
-    # ========================================================
+    # EVERY BAR receives a target.
+    #
+    # 1 = profitable RR trade
+    # 0 = non-profitable RR trade
+    # --------------------------------------------------------
 
-    dataset[
-        "target"
-    ] = (
+    dataset["target"] = (
         dataset[
             RR_RETURN_COLUMN
-        ]
-        > 0.0
+        ] > 0.0
     ).astype(
         np.int8
     )
 
-    # ========================================================
-    # CLEAN INVALID NUMERIC VALUES
-    # ========================================================
+    # --------------------------------------------------------
+    # REMOVE INVALID NUMERIC ROWS
+    # --------------------------------------------------------
 
     numeric_columns = (
         feature_names
         +
-        [
-            RR_RETURN_COLUMN
-        ]
+        [RR_RETURN_COLUMN]
     )
 
     numeric_values = (
@@ -688,9 +614,7 @@ def build_aligned_dataset(
 
     dataset = (
         dataset
-        .loc[
-            valid_numeric
-        ]
+        .loc[valid_numeric]
         .sort_values(
             "timestamp"
         )
@@ -699,18 +623,26 @@ def build_aligned_dataset(
         )
     )
 
-    # ========================================================
-    # PRINT FEATURE INFORMATION
-    # ========================================================
+    # --------------------------------------------------------
+    # REPORT
+    # --------------------------------------------------------
 
-    print()
-    print(
-        "XGBoost feature selection:"
+    crossover_count = int(
+        dataset[
+            "ema_crossover"
+        ].sum()
     )
 
+    non_crossover_count = (
+        len(dataset)
+        -
+        crossover_count
+    )
+
+    print()
+
     print(
-        f"  Candidate columns: "
-        f"{len(candidate_columns)}"
+        "XGBoost feature selection:"
     )
 
     print(
@@ -725,8 +657,9 @@ def build_aligned_dataset(
         )
 
     print()
+
     print(
-        "EMA signal columns:"
+        "EMA trading signal:"
     )
 
     print(
@@ -740,15 +673,49 @@ def build_aligned_dataset(
     )
 
     print()
+
     print(
         f"Aligned rows: "
         f"{len(dataset):,}"
+    )
+
+    print(
+        f"EMA crossover rows: "
+        f"{crossover_count:,}"
+    )
+
+    print(
+        f"Non-crossover rows: "
+        f"{non_crossover_count:,}"
+    )
+
+    print()
+
+    print(
+        "XGBoost training:"
+    )
+
+    print(
+        "  Uses ALL aligned bars."
+    )
+
+    print()
+
+    print(
+        "EMA + XGBoost trading:"
+    )
+
+    print(
+        "  EMA crossover AND "
+        "XGBoost probability >= "
+        f"{PREDICTION_THRESHOLD:.2f}"
     )
 
     return (
         dataset,
         feature_names,
     )
+
 
 # ============================================================
 # SPLIT DATA
@@ -769,12 +736,16 @@ def split_train_validation(
     )
 
     train_mask = (
-        dataset["timestamp"]
+        dataset[
+            "timestamp"
+        ]
         <= train_end
     )
 
     validation_mask = (
-        dataset["timestamp"]
+        dataset[
+            "timestamp"
+        ]
         >= validation_start
     )
 
@@ -801,23 +772,26 @@ def split_train_validation(
 
 
 # ============================================================
-# GET EMA SIGNALS
+# GET EMA SIGNAL MASK
+# ============================================================
+#
+# This is ONLY used when deciding which bars become
+# actual raw EMA trades.
+#
+# It is NOT used for XGBoost training.
 # ============================================================
 
-def get_ema_signal_data(
+def get_ema_signal_mask(
     dataset,
 ):
 
     return (
-        dataset
-        .loc[
-            dataset[
-                "ema_crossover"
-            ]
+        dataset[
+            "ema_crossover"
         ]
-        .copy()
-        .reset_index(
-            drop=True
+        .fillna(False)
+        .to_numpy(
+            dtype=bool
         )
     )
 
@@ -825,14 +799,17 @@ def get_ema_signal_data(
 # ============================================================
 # BUILD TRAINING ARRAYS
 # ============================================================
+#
+# ALL training rows are passed to XGBoost.
+# ============================================================
 
 def build_training_arrays(
-    train_signal_data,
+    train_data,
     feature_names,
 ):
 
     X = (
-        train_signal_data[
+        train_data[
             feature_names
         ]
         .apply(
@@ -845,7 +822,7 @@ def build_training_arrays(
     )
 
     y = (
-        train_signal_data[
+        train_data[
             "target"
         ]
         .to_numpy(
@@ -879,7 +856,10 @@ def build_training_arrays(
             "one target class."
         )
 
-    return X, y
+    return (
+        X,
+        y,
+    )
 
 
 # ============================================================
@@ -916,12 +896,12 @@ def create_model():
 # ============================================================
 
 def train_model(
-    train_signal_data,
+    train_data,
     feature_names,
 ):
 
     X, y = build_training_arrays(
-        train_signal_data,
+        train_data,
         feature_names,
     )
 
@@ -937,8 +917,10 @@ def train_model(
         "=" * 70
     )
 
+    print()
+
     print(
-        f"\nTraining samples: "
+        f"Training samples: "
         f"{len(X):,}"
     )
 
@@ -946,6 +928,14 @@ def train_model(
         f"Features: "
         f"{X.shape[1]}"
     )
+
+    for feature_name in feature_names:
+
+        print(
+            f"  {feature_name}"
+        )
+
+    print()
 
     print(
         f"Trees: "
@@ -967,6 +957,12 @@ def train_model(
         f"{XGBOOST_DEVICE}"
     )
 
+    print()
+
+    print(
+        "Training on ALL bars."
+    )
+
     model = create_model()
 
     model.fit(
@@ -979,16 +975,21 @@ def train_model(
 
 
 # ============================================================
-# PREDICT
+# PREDICT PROBABILITIES
+# ============================================================
+#
+# Predictions are generated for EVERY bar.
+#
+# We do NOT filter by EMA crossover here.
 # ============================================================
 
 def predict_probabilities(
     model,
-    signal_data,
+    data,
     feature_names,
 ):
 
-    if len(signal_data) == 0:
+    if len(data) == 0:
 
         return np.empty(
             0,
@@ -996,7 +997,7 @@ def predict_probabilities(
         )
 
     X = (
-        signal_data[
+        data[
             feature_names
         ]
         .apply(
@@ -1014,7 +1015,7 @@ def predict_probabilities(
     )
 
     probabilities = np.full(
-        len(signal_data),
+        len(data),
         np.nan,
         dtype=np.float32,
     )
@@ -1036,11 +1037,11 @@ def predict_probabilities(
 # ============================================================
 
 def build_equity_curve(
-    signal_data,
+    data,
     trade_mask=None,
 ):
 
-    if len(signal_data) == 0:
+    if len(data) == 0:
 
         return pd.DataFrame(
             columns=[
@@ -1051,12 +1052,16 @@ def build_equity_curve(
         )
 
     data = (
-        signal_data
+        data
         .copy()
         .reset_index(
             drop=True
         )
     )
+
+    # --------------------------------------------------------
+    # SELECT TRADES
+    # --------------------------------------------------------
 
     if trade_mask is None:
 
@@ -1073,7 +1078,7 @@ def build_equity_curve(
 
             raise ValueError(
                 "Trade mask length does not "
-                "match signal data."
+                "match data."
             )
 
         selected = (
@@ -1094,6 +1099,10 @@ def build_equity_curve(
                 "equity",
             ]
         )
+
+    # --------------------------------------------------------
+    # RETURNS
+    # --------------------------------------------------------
 
     returns = (
         pd.to_numeric(
@@ -1121,6 +1130,10 @@ def build_equity_curve(
 
     returns = returns[valid]
 
+    # --------------------------------------------------------
+    # COMPOUND EQUITY
+    # --------------------------------------------------------
+
     equity = np.cumprod(
         1.0 + returns / 100.0,
         dtype=np.float64,
@@ -1131,13 +1144,16 @@ def build_equity_curve(
             "timestamp": (
                 selected[
                     "timestamp"
-                ]
-                .to_numpy()
+                ].to_numpy()
             ),
 
-            "trade_return_percent": returns,
+            "trade_return_percent": (
+                returns
+            ),
 
-            "equity": equity,
+            "equity": (
+                equity
+            ),
         }
     )
 
@@ -1193,7 +1209,9 @@ def summarize_curve(
     )
 
     total_return = (
-        end_equity - 1.0
+        end_equity
+        -
+        1.0
     ) * 100.0
 
     return {
@@ -1266,15 +1284,17 @@ def main():
         "=" * 70
     )
 
+    # ========================================================
+    # R2 CLIENT
+    # ========================================================
+
     client = create_r2_client()
 
     # ========================================================
-    # DOWNLOAD SOURCE DATA
+    # DOWNLOAD INPUT DATA
     # ========================================================
 
     input_path = get_input_path()
-
-    rr_path = get_risk_reward_path()
 
     print(
         "\nDownloading input data:"
@@ -1293,6 +1313,12 @@ def main():
         f"  Rows: "
         f"{len(input_data):,}"
     )
+
+    # ========================================================
+    # DOWNLOAD RR DATA
+    # ========================================================
+
+    rr_path = get_risk_reward_path()
 
     print(
         "\nDownloading risk/reward data:"
@@ -1329,7 +1355,7 @@ def main():
     )
 
     print(
-        f"Aligned rows: "
+        f"\nAligned rows: "
         f"{len(dataset):,}"
     )
 
@@ -1344,7 +1370,7 @@ def main():
     )
 
     print(
-        f"Saved aligned data:"
+        "\nSaved aligned data:"
     )
 
     print(
@@ -1363,17 +1389,17 @@ def main():
     )
 
     # ========================================================
-    # SIGNALS
+    # EMA SIGNAL COUNTS
     # ========================================================
 
-    train_signals = (
-        get_ema_signal_data(
+    train_ema_mask = (
+        get_ema_signal_mask(
             train_data
         )
     )
 
-    validation_signals = (
-        get_ema_signal_data(
+    validation_ema_mask = (
+        get_ema_signal_mask(
             validation_data
         )
     )
@@ -1390,44 +1416,63 @@ def main():
         "=" * 70
     )
 
+    print()
+
     print(
-        f"\nTraining RR bars: "
+        f"Training RR bars: "
         f"{len(train_data):,}"
     )
 
     print(
         f"Training EMA signals: "
-        f"{len(train_signals):,}"
+        f"{np.sum(train_ema_mask):,}"
     )
 
+    print()
+
     print(
-        f"\nValidation RR bars: "
+        f"Validation RR bars: "
         f"{len(validation_data):,}"
     )
 
     print(
         f"Validation EMA signals: "
-        f"{len(validation_signals):,}"
+        f"{np.sum(validation_ema_mask):,}"
+    )
+
+    print()
+
+    print(
+        "XGBoost training uses:"
+    )
+
+    print(
+        f"  ALL {len(train_data):,} training bars"
     )
 
     # ========================================================
-    # SAVE SIGNAL DATA
+    # SAVE TRAINING / VALIDATION DATA
+    # ========================================================
+    #
+    # These files now contain ALL bars.
+    #
+    # The filenames are retained for compatibility.
     # ========================================================
 
     upload_parquet(
         client,
-        train_signals,
+        train_data,
         TRAIN_SIGNALS_PATH,
     )
 
     upload_parquet(
         client,
-        validation_signals,
+        validation_data,
         VALIDATION_SIGNALS_PATH,
     )
 
     print(
-        "\nSaved signal datasets."
+        "\nSaved training/validation datasets."
     )
 
     # ========================================================
@@ -1435,7 +1480,7 @@ def main():
     # ========================================================
 
     model = train_model(
-        train_signals,
+        train_data,
         feature_names,
     )
 
@@ -1481,7 +1526,7 @@ def main():
             )
 
     print(
-        f"\nSaved model:"
+        "\nSaved model:"
     )
 
     print(
@@ -1489,41 +1534,48 @@ def main():
     )
 
     # ========================================================
-    # TRAINING XGBOOST PREDICTIONS
+    # XGBOOST PREDICTIONS
+    #
+    # Predictions are made on EVERY bar.
     # ========================================================
 
     train_probabilities = (
         predict_probabilities(
             model,
-            train_signals,
+            train_data,
             feature_names,
         )
     )
-
-    train_trade_mask = (
-        np.isfinite(
-            train_probabilities
-        )
-        &
-        (
-            train_probabilities
-            >= PREDICTION_THRESHOLD
-        )
-    )
-
-    # ========================================================
-    # VALIDATION XGBOOST PREDICTIONS
-    # ========================================================
 
     validation_probabilities = (
         predict_probabilities(
             model,
-            validation_signals,
+            validation_data,
             feature_names,
         )
     )
 
-    validation_trade_mask = (
+    # ========================================================
+    # XGBOOST CONDITIONS
+    # ========================================================
+    #
+    # XGBoost says YES when probability >= 0.50.
+    #
+    # This condition alone does NOT create a trade.
+    # ========================================================
+
+    train_xgboost_condition = (
+        np.isfinite(
+            train_probabilities
+        )
+        &
+        (
+            train_probabilities
+            >= PREDICTION_THRESHOLD
+        )
+    )
+
+    validation_xgboost_condition = (
         np.isfinite(
             validation_probabilities
         )
@@ -1535,24 +1587,65 @@ def main():
     )
 
     # ========================================================
-    # BUILD FOUR EQUITY CURVES
+    # FINAL TRADE CONDITIONS
+    # ========================================================
+    #
+    # TRADE =
+    #
+    #     EMA crossover
+    #     AND
+    #     XGBoost says profitable
+    #
+    # This is the key global-filter architecture.
+    # ========================================================
+
+    train_trade_mask = (
+        train_ema_mask
+        &
+        train_xgboost_condition
+    )
+
+    validation_trade_mask = (
+        validation_ema_mask
+        &
+        validation_xgboost_condition
+    )
+
+    # ========================================================
+    # BUILD RAW EMA CURVES
+    # ========================================================
+    #
+    # Raw EMA trades EVERY EMA crossover.
     # ========================================================
 
     train_raw = build_equity_curve(
-        train_signals
-    )
-
-    train_xgboost = build_equity_curve(
-        train_signals,
-        train_trade_mask,
+        train_data,
+        train_ema_mask,
     )
 
     validation_raw = build_equity_curve(
-        validation_signals
+        validation_data,
+        validation_ema_mask,
+    )
+
+    # ========================================================
+    # BUILD EMA + XGBOOST CURVES
+    # ========================================================
+    #
+    # Trades only when:
+    #
+    #     EMA crossover
+    #     AND
+    #     XGBoost >= threshold
+    # ========================================================
+
+    train_xgboost = build_equity_curve(
+        train_data,
+        train_trade_mask,
     )
 
     validation_xgboost = build_equity_curve(
-        validation_signals,
+        validation_data,
         validation_trade_mask,
     )
 
@@ -1578,7 +1671,7 @@ def main():
     )
 
     print_curve(
-        "Train XGBoost",
+        "Train EMA + XGBoost",
         train_xgboost,
     )
 
@@ -1588,7 +1681,7 @@ def main():
     )
 
     print_curve(
-        "Validation XGBoost",
+        "Validation EMA + XGBoost",
         validation_xgboost,
     )
 
@@ -1601,58 +1694,88 @@ def main():
     )
 
     print(
-        "XGBOOST FILTER"
+        "XGBOOST GLOBAL FILTER"
     )
 
     print(
         "=" * 70
     )
 
+    print()
+
     print(
-        f"\nPrediction threshold: "
+        f"Prediction threshold: "
         f"{PREDICTION_THRESHOLD:.2f}"
     )
 
+    # --------------------------------------------------------
+    # TRAIN
+    # --------------------------------------------------------
+
     print(
-        f"\nTraining:"
+        "\nTraining:"
+    )
+
+    print(
+        f"  Total bars: "
+        f"{len(train_data):,}"
     )
 
     print(
         f"  EMA signals: "
-        f"{len(train_signals):,}"
+        f"{np.sum(train_ema_mask):,}"
     )
 
     print(
-        f"  Accepted: "
+        f"  XGBoost YES: "
+        f"{np.sum(train_xgboost_condition):,}"
+    )
+
+    print(
+        f"  Final trades: "
         f"{np.sum(train_trade_mask):,}"
     )
 
     print(
-        f"  Rejected: "
-        f"{len(train_trade_mask) - np.sum(train_trade_mask):,}"
+        f"  EMA signals rejected by XGBoost: "
+        f"{np.sum(train_ema_mask & ~train_xgboost_condition):,}"
+    )
+
+    # --------------------------------------------------------
+    # VALIDATION
+    # --------------------------------------------------------
+
+    print(
+        "\nValidation:"
     )
 
     print(
-        f"\nValidation:"
+        f"  Total bars: "
+        f"{len(validation_data):,}"
     )
 
     print(
         f"  EMA signals: "
-        f"{len(validation_signals):,}"
+        f"{np.sum(validation_ema_mask):,}"
     )
 
     print(
-        f"  Accepted: "
+        f"  XGBoost YES: "
+        f"{np.sum(validation_xgboost_condition):,}"
+    )
+
+    print(
+        f"  Final trades: "
         f"{np.sum(validation_trade_mask):,}"
     )
 
     print(
-        f"  Rejected: "
-        f"{len(validation_trade_mask) - np.sum(validation_trade_mask):,}"
+        f"  EMA signals rejected by XGBoost: "
+        f"{np.sum(validation_ema_mask & ~validation_xgboost_condition):,}"
     )
 
     # ========================================================
-    # SAVE FOUR CURVES
+    # SAVE FOUR EQUITY CURVES
     # ========================================================
 
     curves = [
@@ -1716,8 +1839,8 @@ def main():
 
     return {
         "dataset": dataset,
-        "train_signals": train_signals,
-        "validation_signals": validation_signals,
+        "train_data": train_data,
+        "validation_data": validation_data,
         "model": model,
         "train_raw": train_raw,
         "train_xgboost": train_xgboost,
@@ -1727,4 +1850,5 @@ def main():
 
 
 if __name__ == "__main__":
+
     main()
